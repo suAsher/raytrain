@@ -1,0 +1,13 @@
+# OPTIONAL: cap total GPU usage in the namespace. Tune numbers to cluster size.
+# Jobs that would exceed the quota stay Pending (see `raytrain list`).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: raytrain-quota
+  namespace: ray-cluster-3
+spec:
+  hard:
+    requests.nvidia.com/gpu: "24"
+    limits.nvidia.com/gpu:   "24"
+    requests.cpu:            "128"
+    requests.memory:         "1024Gi"

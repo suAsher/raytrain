@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: raytrain-server
+  namespace: raytrain-system
+  labels:
+    app: raytrain-server
+    raytrain.io/component: control-plane
+spec:
+  # M1 starts at 1 replica for simplicity; bump to 2 with a PDB once we have
+  # observability and HA Postgres in place.
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: raytrain-server
+  template:
+    metadata:
+      labels:
+        app: raytrain-server
+        raytrain.io/component: control-plane
+      annotations:
+        # Force pod restart whenever ConfigMap changes by stamping its
+        # checksum here. (CD pipeline rewrites this annotation; or set
+        # `kubectl rollout restart deploy/raytrain-server` manually.)
+        config-hash: "manual"
+    spec:
+      serviceAccountName: raytrain-server
+      automountServiceAccountToken: true
+      containers:
+        - name: raytrain-server
+          # Override with `kubectl set image deploy/raytrain-server …`
+          image: 172.31.9.104:5050/raytrain/raytrain-server:v0.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: raytrain-server-config
+          env:
+            - name: RAYTRAIN_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: raytrain-jwt-key
+                  key: jwt_secret
+            - name: RAYTRAIN_MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: raytrain-minio-creds
+                  key: access_key
+            - name: RAYTRAIN_MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: raytrain-minio-creds
+                  key: secret_key
+            # M4: point at Postgres. The control plane builds the DSN from
+            # the postgres secret. Leave unset to fall back to in-memory.
+            - name: RAYTRAIN_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: raytrain-postgres
+                  key: POSTGRES_PASSWORD
+            - name: RAYTRAIN_DATABASE_URL
+              value: "postgresql://raytrain:$(RAYTRAIN_POSTGRES_PASSWORD)@raytrain-postgres.raytrain-system.svc.cluster.local:5432/raytrain"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 20

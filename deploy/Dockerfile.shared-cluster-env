@@ -1,0 +1,53 @@
+# Env-only image for the long-lived shared RayCluster.
+#
+# 关键思路：这个镜像里 **不含任何训练项目代码**（pointcept / sslod26 等）。
+# 训练代码在提交时由 Ray runtime_env.working_dir 从 MinIO 拉进来。
+# 镜像只提供「环境」：Ray + PyTorch + CUDA + Lance 全家桶 + raytrain 本身。
+#
+# 这样：
+#   - 用户改代码 → 不用 build 镜像（代码走 working_dir）
+#   - raytrain 烤进镜像 → 用户不用 pip install raytrain
+#   - 镜像月级别更新（只在依赖 / CUDA 变化时）
+#
+# 构建（在 raytrain/ 目录下执行，build context = raytrain/）：
+#   docker build \
+#       -f deploy/Dockerfile.shared-cluster-env \
+#       --build-arg BASE=172.31.9.104:5050/training/base-ray-pytorch:ray2.54.1-torch2.5.0-cu124 \
+#       -t 172.31.9.104:5050/raytrain/raytrain-base-env:ray2.54.1-cu124-v1 \
+#       .
+#
+#   docker push 172.31.9.104:5050/raytrain/raytrain-base-env:ray2.54.1-cu124-v1
+#
+# 这个 tag 要和 deploy/raycluster-shared-h20.yaml 里 image 字段一致。
+#
+ARG BASE
+FROM ${BASE}
+
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+# Ray Data + Lance 零拷贝通路需要的库（base 里若已有会被 pip 跳过）。
+RUN python -m pip install \
+      --index-url ${PIP_INDEX_URL} \
+      --trusted-host ${PIP_TRUSTED_HOST} \
+      --timeout 120 --retries 10 \
+      "ray[data]==2.54.1" \
+      "pylance>=0.20" \
+      "pyarrow>=15.0" \
+      "minio>=7.2" \
+      "jinja2>=3.1" \
+      "click>=8.1" \
+      "pathspec>=0.11"
+
+# 把 raytrain 框架烤进镜像。COPY . = raytrain/ 整个源码树（.dockerignore 过滤）。
+# 注意：这里只装 raytrain 框架，不含任何训练项目代码。
+COPY . /opt/raytrain
+RUN python -m pip install /opt/raytrain
+
+# 自检：driver / data 模块 + Lance 能 import 才算成功。
+RUN python -c "from raytrain.entrypoint import driver; \
+               from raytrain.data import RayLanceDataset, auto_dataset; \
+               import ray, ray.data, lance, pyarrow, pathspec; \
+               print('shared-cluster-env OK, ray=', ray.__version__)"
+
+# 默认无 CMD —— KubeRay 会用 rayStartParams 接管启动。

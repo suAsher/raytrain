@@ -1,0 +1,45 @@
+# 在已有项目镜像之上加一层 raytrain。
+#
+# 前提：你的 base 镜像里已经装好 ray / mlflow / boto3 / pyyaml
+#       （你的 base-ray-pytorch 就是这样，参见 dockerfile/Dockerfile.base-ray-pytorch）
+# 这里只追加 raytrain 需要但 base 还没装的三个纯 python 包，再装 raytrain 本身。
+#
+# 构建方式：在 raytrain/ 目录下执行
+#   docker build \
+#       -f deploy/Dockerfile.raytrain-layer \
+#       --build-arg BASE=172.31.9.104:5050/training/pointcept:ray2.54.1-torch2.5.0-cu124 \
+#       -t 172.31.9.104:5050/training/pointcept:ray2.54.1-torch2.5.0-cu124-raytrain \
+#       .
+#
+# 然后 push：
+#   docker push 172.31.9.104:5050/training/pointcept:ray2.54.1-torch2.5.0-cu124-raytrain
+#
+ARG BASE
+FROM ${BASE}
+
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+# base 里已经有 ray / mlflow / boto3 / pyyaml / rich，这里只补齐 raytrain 需要的：
+#   - minio: driver 侧数据集同步使用 python-minio SDK
+#   - jinja2: 渲染 RayJob 模板（driver 里其实不用，CLI 才用；但保险起见留一份）
+#   - click:  CLI 框架；这个镜像也可以作为 CLI 测试环境
+RUN python -m pip install \
+      --index-url ${PIP_INDEX_URL} \
+      --trusted-host ${PIP_TRUSTED_HOST} \
+      --timeout 120 --retries 10 \
+      "minio>=7.2" \
+      "jinja2>=3.1" \
+      "click>=8.1" \
+      "pylance>=0.20" \
+      "pyarrow>=15.0"
+
+# 把 raytrain 源码注入并安装。docker build context 必须是 raytrain/ 目录，
+# 所以这里 COPY . 拷贝的是整个框架源码（由 .dockerignore 过滤掉 pycache 等）。
+COPY . /opt/raytrain
+RUN python -m pip install /opt/raytrain
+
+# 自检：导入失败就让构建失败，而不是到运行时才出错。
+RUN python -c "from raytrain.entrypoint import driver; \
+               import ray, mlflow, boto3, minio, jinja2, yaml, lance; \
+               print('raytrain layer OK, ray=', ray.__version__)"

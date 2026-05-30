@@ -1,0 +1,158 @@
+# =============================================================================
+# 长寿 RayCluster · A100 GPU 池（Phase 2 · Shared_Cluster_Mode）
+# =============================================================================
+# 运维以声明式方式部署"按 GPU 类型分组的长寿 RayCluster"。用户提交时不再创建
+# per-job RayCluster，而是通过 Ray Job Submission API 把任务投递到这里。
+#
+# 部署：
+#   kubectl create namespace ray-shared || true   # namespace 需先存在
+#   kubectl apply -f deploy/shared-cluster/raycluster-a100.yaml
+# 验证：
+#   kubectl -n ray-shared get raycluster -l raytrain.shared=true
+#   kubectl -n ray-shared get pods -l ray.io/cluster=ray-shared-a100
+#   # head pod Running 即部署成功
+#
+# 幂等：重复 apply 只更新 RayCluster / Service，不会删除已有 RayJob。
+# 升级 Ray / KubeRay 版本前，先停止接受新 submission，等 in-flight 任务跑完再
+# rolling-update（详见 deploy/shared-cluster/README.md）。
+# =============================================================================
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: ray-shared-a100
+  namespace: ray-shared
+  labels:
+    # 这两个 label 让 raytrain 在 list 时把 shared cluster 与 per-job cluster
+    # 区分开；`kubectl get raycluster -l raytrain.shared=true` 依赖它。
+    raytrain.shared: "true"
+    raytrain.gpu_type: a100
+spec:
+  rayVersion: "2.54.1"
+  # 长寿池的核心：开启 KubeRay in-tree autoscaler。空闲时 worker 缩到 0，
+  # 不占 GPU；有任务投递时按需扩到 maxReplicas。
+  enableInTreeAutoscaling: true
+
+  # ---------------------------------------------------------------------------
+  # Head：CPU-only，只跑 GCS / dashboard / Job Submission API，不参与训练。
+  # ---------------------------------------------------------------------------
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: "0.0.0.0"   # 让 8265 dashboard / Job Submission API 对外可达
+      num-gpus: "0"               # head 不分配 GPU
+    template:
+      metadata:
+        labels:
+          raytrain.role: head
+          raytrain.shared: "true"
+          raytrain.gpu_type: a100
+      spec:
+        # Ray head/worker Pod 默认用 default ServiceAccount（须能访问 MinIO/MLflow）。
+        serviceAccountName: default
+        containers:
+          - name: ray-head
+            # 仅含运行环境（ray/torch/cuda/依赖），不含训练代码——代码在任务提交时
+            # 通过 runtime_env.working_dir 从 MinIO 拉取。
+            # TODO(ops): 换成专门的 env-only 镜像 tag；此处沿用项目镜像仅作占位。
+            image: 172.31.9.104:5050/training/pointcept:ray2.54.1-torch2.5.0-cu124
+            imagePullPolicy: Always
+            resources:
+              requests: {cpu: "2", memory: "8Gi"}
+              limits:   {cpu: "4", memory: "16Gi"}
+            ports:
+              - {name: gcs,       containerPort: 6379}
+              - {name: client,    containerPort: 10001}
+              - {name: dashboard, containerPort: 8265}
+            volumeMounts:
+              - {name: dshm, mountPath: /dev/shm}
+        volumes:
+          - name: dshm
+            emptyDir: {medium: Memory, sizeLimit: "4Gi"}
+
+  # ---------------------------------------------------------------------------
+  # GPU worker 组：autoscaling 0 -> maxReplicas。
+  #
+  # GPU-per-pod 选择：每个 worker pod 申请 1 块 GPU（而非整节点 8 块）。
+  #   - 1 GPU/pod 让 autoscaler 以 GPU 为粒度 bin-pack，多个小任务能共享一个
+  #     物理节点，空闲回收也更细。
+  #   - 如需"整节点独占"语义（大模型多机训练），把下面三处一起改成 8：
+  #       rayStartParams.num-gpus: "8"
+  #       resources.requests/limits.nvidia.com/gpu: "8"（cpu/memory 同步放大）
+  #     并把 maxReplicas 改成节点数（如 A100+A101 两节点则 maxReplicas: 2）。
+  #
+  # 池容量：maxReplicas: 16（最多 16 块 A100 GPU 同时在线）。
+  # ---------------------------------------------------------------------------
+  workerGroupSpecs:
+    - groupName: gpu-workers
+      replicas: 0        # 初始 0，由 autoscaler 按需拉起
+      minReplicas: 0     # 空闲时缩到 0，不占 GPU
+      maxReplicas: 16
+      rayStartParams:
+        num-gpus: "1"
+        # object store 保持小，重的 spill 落盘到 /mnt/ray-spill（见 hostPath）。
+        object-store-memory: "2000000000"
+      template:
+        metadata:
+          labels:
+            raytrain.role: worker
+            raytrain.shared: "true"
+            raytrain.gpu_type: a100
+        spec:
+          serviceAccountName: default
+          # 只调度到打了 gpu=a100 标签的节点（节点标签见 deploy/node-labels.sh）。
+          nodeSelector:
+            gpu: "a100"
+          containers:
+            - name: ray-worker
+              image: 172.31.9.104:5050/training/pointcept:ray2.54.1-torch2.5.0-cu124
+              imagePullPolicy: Always
+              # 1 GPU/pod 的资源形状：按 8-GPU 节点 ~平均切分（8 CPU / 64Gi / 1 GPU）。
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: "64Gi"
+                  nvidia.com/gpu: "1"
+                limits:
+                  cpu: "8"
+                  memory: "64Gi"
+                  nvidia.com/gpu: "1"
+              env:
+                # NCCL 默认走以太网；具体任务可在提交时用 runtime_env 覆盖。
+                - {name: NCCL_IB_DISABLE,            value: "1"}
+                - {name: NCCL_SOCKET_IFNAME,         value: "^lo,docker0"}
+                - {name: NCCL_ASYNC_ERROR_HANDLING,  value: "1"}
+              volumeMounts:
+                - {name: dshm,      mountPath: /dev/shm}
+                - {name: ray-cache, mountPath: /mnt/ray-cache}
+                - {name: ray-spill, mountPath: /mnt/ray-spill}
+          volumes:
+            - name: dshm
+              emptyDir: {medium: Memory, sizeLimit: "16Gi"}
+            # 这两个 hostPath 必须在 A100 节点上存在（目录即可，无需 PV/PVC）。
+            - name: ray-cache
+              hostPath: {path: /data4/ray-cache, type: DirectoryOrCreate}
+            - name: ray-spill
+              hostPath: {path: /data3/ray-spill, type: DirectoryOrCreate}
+---
+# =============================================================================
+# Head Service（ClusterIP）：长寿、稳定的集群入口。
+# raytrain User_Config 里 shared_clusters.a100 指向：
+#   http://ray-shared-a100-head.ray-shared.svc:8265
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: ray-shared-a100-head
+  namespace: ray-shared
+  labels:
+    raytrain.shared: "true"
+    raytrain.gpu_type: a100
+spec:
+  type: ClusterIP
+  selector:
+    # KubeRay 给 head pod 打的内置 label，选中本 RayCluster 的 head。
+    ray.io/cluster: ray-shared-a100
+    ray.io/node-type: head
+  ports:
+    - {name: dashboard, port: 8265,  targetPort: 8265}   # dashboard / Job Submission API
+    - {name: client,    port: 10001, targetPort: 10001}  # Ray client
+    - {name: gcs,       port: 6379,  targetPort: 6379}    # GCS

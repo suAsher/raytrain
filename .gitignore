@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.eggs/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# Node / web build
+node_modules/
+*.tsbuildinfo
+
+# raytrain local caches / scratch
+.raytrain-cache/
+.kiro/_tmp_*
+**/_tmp_*.py
+**/_smoke_*.py

@@ -1,0 +1,88 @@
+# Postgres for raytrain control-plane state (workspaces / dev_sessions /
+# datasets / audit_log). Single replica with a Longhorn PVC.
+#
+# For production HA, replace with a managed Postgres or an operator
+# (CloudNativePG / Zalando). This single-instance setup is fine for the
+# control plane's low write volume; back it up via PVC snapshots.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: raytrain-postgres
+  namespace: raytrain-system
+type: Opaque
+stringData:
+  POSTGRES_DB: raytrain
+  POSTGRES_USER: raytrain
+  # CHANGE before applying.
+  POSTGRES_PASSWORD: "REPLACE_ME"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: raytrain-postgres-data
+  namespace: raytrain-system
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: raytrain-postgres
+  namespace: raytrain-system
+  labels:
+    app: raytrain-postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: raytrain-postgres
+  template:
+    metadata:
+      labels:
+        app: raytrain-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: raytrain-postgres
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "raytrain"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: "200m", memory: "256Mi"}
+            limits: {cpu: "1", memory: "1Gi"}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: raytrain-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: raytrain-postgres
+  namespace: raytrain-system
+spec:
+  type: ClusterIP
+  selector:
+    app: raytrain-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

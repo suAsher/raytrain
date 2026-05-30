@@ -1,0 +1,178 @@
+# =============================================================================
+# raytrain Platform — single-node LOCAL validation manifest
+# =============================================================================
+# Purpose: bring up the PLATFORM (web UI + backend) on a one-node k8s cluster
+# (kind / k3s / minikube) so you can log in, manage users/quota, and click
+# through every page.
+#
+# Deliberately stripped vs the production manifests under raytrain-server/deploy/:
+#   - NO postgres / longhorn  -> backend uses in-memory store (state resets on
+#     pod restart; fine for a smoke test)
+#   - NO RayCluster / GPU     -> training submission won't actually run, but the
+#     whole UI + auth + user/quota management works
+#   - NO MinIO / MLflow deps  -> not needed to validate the platform itself
+#   - public-ish local image tags + IfNotPresent (load images into the node)
+#
+# This is for THROWAWAY local testing only. The JWT secret below is a known
+# dev value — do NOT use this file in production.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: raytrain-system
+  labels:
+    raytrain.io/component: control-plane
+    raytrain.io/env: local-singlenode
+---
+# JWT signing key. Fixed dev value so `raytrain-issue-token` inside the pod
+# signs tokens this same server accepts. LOCAL ONLY.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: raytrain-jwt-key
+  namespace: raytrain-system
+type: Opaque
+stringData:
+  jwt_secret: "local-singlenode-dev-secret-change-me-32b"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: raytrain-server-config
+  namespace: raytrain-system
+data:
+  # No real cluster wired in for the smoke test. Empty map = no shared cluster;
+  # the UI + auth + user/quota all work; only actual job submission is inert.
+  RAYTRAIN_SHARED_CLUSTERS: "{}"
+  RAYTRAIN_JWT_ISSUER: "raytrain-server"
+  RAYTRAIN_JWT_DEFAULT_TTL_DAYS: "365"
+  RAYTRAIN_SERVER_HOST: "0.0.0.0"
+  RAYTRAIN_SERVER_PORT: "8080"
+  RAYTRAIN_LOG_LEVEL: "INFO"
+  # DATABASE_URL intentionally unset -> in-memory store.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: raytrain-server
+  namespace: raytrain-system
+  labels:
+    app: raytrain-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: raytrain-server
+  template:
+    metadata:
+      labels:
+        app: raytrain-server
+    spec:
+      containers:
+        - name: raytrain-server
+          # Built locally and loaded into the node (see README). No registry.
+          image: raytrain/raytrain-server:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: raytrain-server-config
+          env:
+            - name: RAYTRAIN_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: raytrain-jwt-key
+                  key: jwt_secret
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests: {cpu: "100m", memory: "128Mi"}
+            limits: {cpu: "1", memory: "512Mi"}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: raytrain-server
+  namespace: raytrain-system
+  labels:
+    app: raytrain-server
+spec:
+  # ClusterIP so the web nginx can reach it at
+  # raytrain-server.raytrain-system.svc.cluster.local:8080 (matches nginx.conf)
+  type: ClusterIP
+  selector:
+    app: raytrain-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: raytrain-web
+  namespace: raytrain-system
+  labels:
+    app: raytrain-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: raytrain-web
+  template:
+    metadata:
+      labels:
+        app: raytrain-web
+    spec:
+      containers:
+        - name: web
+          image: raytrain/raytrain-web:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: {path: /, port: 80}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: {cpu: "50m", memory: "64Mi"}
+            limits: {cpu: "500m", memory: "256Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: raytrain-web
+  namespace: raytrain-system
+  labels:
+    app: raytrain-web
+spec:
+  # NodePort so you can hit the UI from the host browser.
+  type: NodePort
+  selector:
+    app: raytrain-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30880

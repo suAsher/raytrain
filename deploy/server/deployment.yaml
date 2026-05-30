@@ -1,0 +1,222 @@
+# =============================================================================
+# raytrain submission server —— K8s 部署清单（multi-doc）。
+#
+# 包含：Namespace / ConfigMap / Secret(stub) / Deployment / Service(ClusterIP) /
+#       Ingress(HTTPS, 主选) （+ 文件末尾 NodePort 备选，注释保留二选一）。
+#
+# 一把部署：
+#   kubectl apply -f deploy/server/deployment.yaml
+#
+# ── 部署前置（ops 必做）────────────────────────────────────────────────────
+# 1. 构建并推送镜像（见 deploy/server/Dockerfile），把下面 Deployment.image 的
+#    占位 tag 换成真实 tag。
+# 2. 创建 JWT secret（不要把真值提交进仓库！）：
+#      kubectl -n raytrain-system create secret generic raytrain-server-secrets \
+#          --from-literal=RAYTRAIN_JWT_SECRET="$(openssl rand -hex 32)"
+#    本文件里的 Secret 对象只是 **占位 stub**，apply 后请用上面命令覆盖，或先
+#    删掉本文件里的 Secret 段、改用 kubectl create。
+# 3. Ingress 的 host / tls secret / ingressClassName 都是环境相关占位值，按 dev
+#    集群实际情况改（见文件末 Ingress 段注释）。
+#
+# ── 验收（DEFERRED 到 dev 集群，本地无集群只做静态校验）──────────────────────
+#   kubectl apply -f deploy/server/deployment.yaml
+#   kubectl -n raytrain-system rollout status deploy/raytrain-server
+#   kubectl -n raytrain-system get svc raytrain-server          # ClusterIP:8080
+#   # 集群内自测（不依赖 Ingress）：
+#   kubectl -n raytrain-system run curl --rm -it --image=curlimages/curl --restart=Never -- \
+#       curl -fsS http://raytrain-server.raytrain-system.svc:8080/healthz
+#   # 经 Ingress 的 HTTPS 验收（host 换成实际值）：
+#   curl -fsS https://raytrain.internal.example.com/healthz       # 期望 200 {"status":"ok"}
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: raytrain-system
+  labels:
+    app.kubernetes.io/part-of: raytrain
+    raytrain.component: submission-server
+---
+# server 的非敏感配置。RAYTRAIN_SHARED_CLUSTERS 指向 tasks 6.1/6.2 部署的长寿
+# RayCluster head Service（ray-shared namespace，8265 = dashboard / Job Submission API）。
+# 改 gpu_type / 集群入口时只改这里，不用动 Deployment。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: raytrain-server-config
+  namespace: raytrain-system
+  labels:
+    app: raytrain-server
+    raytrain.component: submission-server
+data:
+  # JSON：gpu_type -> ray head dashboard URL（in-cluster DNS）。
+  RAYTRAIN_SHARED_CLUSTERS: |
+    {"h20":"http://ray-shared-h20-head.ray-shared.svc:8265","a100":"http://ray-shared-a100-head.ray-shared.svc:8265"}
+---
+# !!! 占位 STUB —— ops 必须替换 !!!
+# RAYTRAIN_JWT_SECRET 是 HS256 签名密钥，泄露 = 任何人都能签发合法 token。
+# 不要把真值提交进 git。推荐做法：删掉本段，改用
+#   kubectl -n raytrain-system create secret generic raytrain-server-secrets \
+#       --from-literal=RAYTRAIN_JWT_SECRET="$(openssl rand -hex 32)"
+# 这里保留一个 stub 只是为了 `kubectl apply` 不报"secret 不存在"，值是显眼的占位符。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: raytrain-server-secrets
+  namespace: raytrain-system
+  labels:
+    app: raytrain-server
+    raytrain.component: submission-server
+type: Opaque
+stringData:
+  # TODO(ops): REPLACE_ME —— 用 `openssl rand -hex 32` 生成真值后覆盖本 Secret。
+  RAYTRAIN_JWT_SECRET: "REPLACE_ME_PLACEHOLDER_DO_NOT_USE_IN_PROD"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: raytrain-server
+  namespace: raytrain-system
+  labels:
+    app: raytrain-server
+    raytrain.component: submission-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: raytrain-server
+  template:
+    metadata:
+      labels:
+        app: raytrain-server
+        raytrain.component: submission-server
+    spec:
+      # server 只通过 HTTP 访问 ray-shared 的 dashboard（8265），不直接调 K8s API，
+      # 所以 default SA + 网络可达 ray-shared namespace 即可，无需额外 RBAC。
+      # 若集群启用了 NetworkPolicy，需放行 raytrain-system -> ray-shared:8265。
+      serviceAccountName: default
+      containers:
+        - name: raytrain-server
+          # TODO(ops): 换成实际构建并推送的 tag（见 deploy/server/Dockerfile）。
+          image: 172.31.9.104:5050/raytrain/raytrain-server:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # HS256 签名密钥，来自 Secret（绝不 hardcode）。
+            - name: RAYTRAIN_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: raytrain-server-secrets
+                  key: RAYTRAIN_JWT_SECRET
+          # 非敏感配置（shared cluster 映射）整段从 ConfigMap 注入。
+          envFrom:
+            - configMapRef:
+                name: raytrain-server-config
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+---
+# 集群内稳定入口。CLI（shared 模式）和 Ingress 都打这个 Service:8080。
+apiVersion: v1
+kind: Service
+metadata:
+  name: raytrain-server
+  namespace: raytrain-system
+  labels:
+    app: raytrain-server
+    raytrain.component: submission-server
+spec:
+  type: ClusterIP
+  selector:
+    app: raytrain-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# =============================================================================
+# HTTPS 暴露 —— 主选：Ingress（networking.k8s.io/v1）。
+# 备选 NodePort 见文件最末注释块（二选一，按集群实际启用其一）。
+#
+# host / tls secretName / ingressClassName 都是 **环境相关占位值**：
+#   - host:           换成 dev 集群实际域名
+#   - ingressClassName: 换成集群里实际的 ingress controller（nginx / traefik / ...）
+#   - tls.secretName: 指向已存在的 TLS 证书 Secret（cert-manager 签发或手动导入）：
+#       kubectl -n raytrain-system create secret tls raytrain-server-tls \
+#           --cert=tls.crt --key=tls.key
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: raytrain-server
+  namespace: raytrain-system
+  labels:
+    app: raytrain-server
+    raytrain.component: submission-server
+  annotations:
+    # nginx ingress 示例注解；用其它 controller 时按需替换/删除。
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - raytrain.internal.example.com
+      secretName: raytrain-server-tls
+  rules:
+    - host: raytrain.internal.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: raytrain-server
+                port:
+                  number: 8080
+# =============================================================================
+# 备选：NodePort（若 dev 集群没有 ingress controller，用这个对外暴露 HTTPS）。
+# 注意：NodePort 本身是明文 TCP；HTTPS 终止要么在 server 前加一层 TLS，要么
+# 在外部负载均衡 / 反向代理上做。启用时删掉上面的 Ingress 段并取消下面注释。
+#
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: raytrain-server-nodeport
+#   namespace: raytrain-system
+#   labels:
+#     app: raytrain-server
+#     raytrain.component: submission-server
+# spec:
+#   type: NodePort
+#   selector:
+#     app: raytrain-server
+#   ports:
+#     - name: https
+#       port: 8080
+#       targetPort: 8080
+#       nodePort: 30443   # 30000-32767 之间任选，需与外部 LB/证书配置一致
+#       protocol: TCP
+# =============================================================================

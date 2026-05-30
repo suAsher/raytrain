@@ -1,0 +1,33 @@
+# Server config that DOESN'T contain secrets. Things that change per
+# environment (dev / staging / prod) live here so the same image runs
+# everywhere.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: raytrain-server-config
+  namespace: raytrain-system
+data:
+  # MinIO endpoint (in-cluster service)
+  RAYTRAIN_MINIO_ENDPOINT: "http://minio.waterpool.svc.cluster.local:9000"
+  RAYTRAIN_MINIO_REGION: "us-east-1"
+  RAYTRAIN_MINIO_SECURE: "false"
+  RAYTRAIN_CODE_BUCKET: "raytrain-code"
+
+  # Long-lived RayClusters: gpu_type -> Ray Job Submission API base URL.
+  # Update once a new cluster comes online.
+  RAYTRAIN_SHARED_CLUSTERS: |
+    {
+      "h20": "http://ray-shared-h20-head.raytrain-shared.svc.cluster.local:8265"
+    }
+
+  # MLflow tracking
+  RAYTRAIN_MLFLOW_TRACKING_URI: "http://mlflow.mlflow.svc.cluster.local:5000"
+
+  # JWT settings
+  RAYTRAIN_JWT_ISSUER: "raytrain-server"
+  RAYTRAIN_JWT_DEFAULT_TTL_DAYS: "365"
+
+  # Service
+  RAYTRAIN_SERVER_HOST: "0.0.0.0"
+  RAYTRAIN_SERVER_PORT: "8080"
+  RAYTRAIN_LOG_LEVEL: "INFO"

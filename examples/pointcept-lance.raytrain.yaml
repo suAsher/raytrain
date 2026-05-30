@@ -1,0 +1,52 @@
+# .raytrain.yaml — Pointcept with Ray Data + Lance (streaming from MinIO)
+#
+# This is the "new path" alternative to the datasets: field.
+# Instead of downloading data to local NVMe, the training code
+# streams Lance data from MinIO via Ray Data with zero-copy,
+# Plasma caching, prefetch, and CPU-offloaded transforms.
+#
+# Usage:
+#   raytrain submit \
+#     --config configs/nuscenes/semseg-pt-v3m1-0-lance.py \
+#     --gpus 8 --nodes 2 --gpu-type h20 \
+#     --manifest-path examples/pointcept-lance.raytrain.yaml
+
+apiVersion: raytrain/v1
+
+image: 172.31.9.104:5050/pointcept:latest
+workdir: /workspace/pointcept
+repo_name: pointcept
+
+launcher:
+  type: native_ddp
+  entrypoint: tools/train.py
+  args:
+    - --config-file={config}
+    - --num-gpus={num_gpus_per_node}
+    - --num-machines={num_nodes}
+    - --machine-rank={node_rank}
+    - --dist-url=tcp://{master_addr}:{master_port}
+    - --options
+    - save_path={save_path}
+
+resources:
+  gpus_per_node: 8
+  cpus_per_node: 32
+  memory_per_node: 256Gi
+  shm_size: 32Gi
+
+# NEW: Ray Data + Lance streaming data source (replaces datasets:)
+data_source:
+  type: lance
+  uri: s3://lance-datasets/nuscenes-v1/train.lance
+  version: latest
+  # filter: "split == 'train'"    # optional: Lance filter expression
+  # columns: []                    # optional: column pruning (empty = all)
+
+# CPU-only workers for Ray Data transforms (decode/augment).
+# These pods have num-gpus=0, only providing CPU for ActorPool transforms.
+# Set to 0 to disable (transforms run on GPU worker CPU instead).
+cpu_workers: 4
+
+artifacts:
+  - /mnt/ray-cache/exp

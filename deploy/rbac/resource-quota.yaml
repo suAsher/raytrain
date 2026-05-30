@@ -1,0 +1,24 @@
+# Optional ResourceQuota (per-namespace cap)
+#
+# 把 raytrain 所有用户用的 GPU/CPU/内存总量做个上限。
+# 每个 namespace 里只装一份，被所有用户共享。
+# 想给不同 namespace 不同配额，复制这份文件改数字即可。
+#
+# 字段含义：
+#   requests.nvidia.com/gpu: namespace 内所有 Pod requests 的 GPU 总数上限
+#   limits.nvidia.com/gpu  : namespace 内所有 Pod limits 的 GPU 总数上限
+#   pods                   : 总 Pod 数（防止误开几百个）
+#
+# 触发方式：超额的 RayJob 会 stay Pending（KubeRay 调度不出 worker pod）。
+# 通过 `raytrain list` 能看到状态。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: raytrain-quota
+spec:
+  hard:
+    requests.nvidia.com/gpu: "24"
+    limits.nvidia.com/gpu: "24"
+    requests.cpu: "128"
+    requests.memory: "1024Gi"
+    pods: "100"

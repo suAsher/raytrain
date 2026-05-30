@@ -1,0 +1,53 @@
+#
+# .raytrain.yaml for the Pointcept repo.
+#
+# Place this file at the REPO ROOT (next to tools/, pointcept/, configs/).
+# Do not modify Pointcept source code; this manifest drives submission only.
+#
+apiVersion: raytrain/v1
+
+image: 172.31.9.104:5050/pointcept:latest
+workdir: /workspace/pointcept       # where pointcept/ configs/ tools/ live in the image
+repo_name: pointcept
+
+launcher:
+  type: native_ddp
+  # Directly invoke Pointcept's own training entrypoint. It already accepts
+  # --dist-url / --num-gpus / --num-machines / --machine-rank.
+  entrypoint: tools/train.py
+  args:
+    - --config-file={config}
+    - --num-gpus={num_gpus_per_node}
+    - --num-machines={num_nodes}
+    - --machine-rank={node_rank}
+    - --dist-url=tcp://{master_addr}:{master_port}
+    - --options
+    - save_path={save_path}
+
+resources:
+  # Defaults; override per-submit with `--gpus` / `--nodes`.
+  gpus_per_node: 8
+  cpus_per_node: 32
+  memory_per_node: 256Gi
+  shm_size: 32Gi
+
+# Datasets are synced from MinIO to /mnt/ray-cache/datasets/<name>/ on each
+# worker node, then symlinked into workdir at the `mount` path. This is safe
+# to run many times; the first job pays for the download, later jobs hit cache.
+#
+# NOTE: paths listed here are just the defaults baked into the manifest. Users
+# can still put ad-hoc datasets under /mnt/ray-cache/datasets/ themselves via
+# `raytrain data pull` and skip listing them here.
+datasets:
+  - {name: scannet,    s3: s3://pointcept-data/scannet,    mount: data/scannet}
+  - {name: scannet200, s3: s3://pointcept-data/scannet200, mount: data/scannet200}
+  - {name: scannetpp,  s3: s3://pointcept-data/scannetpp,  mount: data/scannetpp}
+  - {name: s3dis,      s3: s3://pointcept-data/s3dis,      mount: data/s3dis}
+
+# Artifacts uploaded to MLflow on successful completion. Relative to workdir.
+# save_path = /mnt/ray-cache/exp/<user>/<run_id>, rendered by the framework;
+# the training job writes there, and we collect the main model + config.
+artifacts:
+  # Entire experiment dir if you want everything (can be large):
+  # - /mnt/ray-cache/exp/{run_id}
+  - /mnt/ray-cache/exp

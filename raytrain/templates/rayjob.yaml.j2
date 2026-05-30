@@ -1,0 +1,239 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: {{ job_name }}
+  namespace: {{ namespace }}
+  labels:
+    raytrain.owner: {{ user }}
+    raytrain.repo: {{ repo_name }}
+    raytrain.gpu_type: {{ gpu_type }}
+    raytrain.run_id: "{{ mlflow_run_id }}"
+  annotations:
+    raytrain.config_name: {{ config_name }}
+    raytrain.num_nodes: "{{ num_nodes }}"
+    raytrain.gpus_per_node: "{{ gpus_per_node }}"
+spec:
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: {{ ttl_seconds_after_finished }}
+  # Job runs INSIDE the head pod. Entry script is mounted via working_dir, not
+  # baked into the image (keeps image stable across framework upgrades).
+  # entrypoint 绕开 Ray runtime_env 对 PYTHONPATH 的劫持，
+  # 直接用镜像里已装的 /opt/conda/bin/python + 显式 PYTHONPATH 指向 site-packages。
+  entrypoint: >-
+    bash -c 'export PYTHONPATH=/opt/conda/lib/python3.11/site-packages:$PYTHONPATH;
+    exec /opt/conda/bin/python -m raytrain.entrypoint.driver
+    --manifest /raytrain/manifest.yaml
+    --plan /raytrain/plan.yaml'
+  runtimeEnvYAML: |
+    {%- if code_uri %}
+    # M0: code-as-submission. Ray fetches this zip from MinIO and chdirs every
+    # worker into the unzipped directory before running the driver / training
+    # subprocess. The image therefore does NOT need to contain the user's
+    # training code, and changing one line of code does NOT require a rebuild.
+    working_dir: "{{ code_uri }}"
+    config:
+      setup_timeout_seconds: 600
+    {%- endif %}
+    env_vars:
+      RAYTRAIN_USER: "{{ user }}"
+      RAYTRAIN_JOB_NAME: "{{ job_name }}"
+      RAYTRAIN_REPO: "{{ repo_name }}"
+      PYTHONUNBUFFERED: "1"
+      {%- if code_uri %}
+      RAYTRAIN_CODE_URI: "{{ code_uri }}"
+      RAYTRAIN_CODE_HASH: "{{ code_hash }}"
+      RAYTRAIN_CODE_SIZE_BYTES: "{{ code_size_bytes }}"
+      {%- endif %}
+  rayClusterSpec:
+    rayVersion: "{{ ray_version }}"
+    enableInTreeAutoscaling: false
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+        num-gpus: "0"
+      template:
+        metadata:
+          labels:
+            raytrain.role: head
+            raytrain.owner: {{ user }}
+        spec:
+          serviceAccountName: {{ service_account }}
+          restartPolicy: Never
+          containers:
+            - name: ray-head
+              image: {{ image }}
+              imagePullPolicy: Always
+              resources:
+                requests: {cpu: "2", memory: "8Gi"}
+                limits:   {cpu: "4", memory: "16Gi"}
+              env:
+                {%- for k, v in env_vars.items() %}
+                - {name: "{{ k }}", value: "{{ v }}"}
+                {%- endfor %}
+                {%- for s in env_from_secrets %}
+                - name: "{{ s.name }}"
+                  valueFrom:
+                    secretKeyRef:
+                      name: "{{ s.secret }}"
+                      key: "{{ s.key }}"
+                {%- endfor %}
+              volumeMounts:
+                - {name: raytrain-payload, mountPath: /raytrain}
+                - {name: dshm,             mountPath: /dev/shm}
+          volumes:
+            - name: raytrain-payload
+              configMap:
+                name: {{ payload_configmap }}
+            - name: dshm
+              emptyDir: {medium: Memory, sizeLimit: "4Gi"}
+
+    workerGroupSpecs:
+      - groupName: gpu-workers
+        replicas: {{ num_nodes }}
+        minReplicas: {{ num_nodes }}
+        maxReplicas: {{ num_nodes }}
+        rayStartParams:
+          num-gpus: "{{ gpus_per_node }}"
+          # keep object store small; heavy spill goes to disk instead
+          object-store-memory: "{{ object_store_memory_bytes }}"
+        template:
+          metadata:
+            labels:
+              raytrain.role: worker
+              raytrain.owner: {{ user }}
+          spec:
+            serviceAccountName: {{ service_account }}
+            restartPolicy: Never
+            nodeSelector:
+              gpu: "{{ gpu_type }}"
+            containers:
+              - name: ray-worker
+                image: {{ image }}
+                imagePullPolicy: Always
+                resources:
+                  requests:
+                    cpu: "{{ cpus_per_node }}"
+                    memory: "{{ memory_per_node }}"
+                    nvidia.com/gpu: "{{ gpus_per_node }}"
+                  limits:
+                    cpu: "{{ cpus_per_node }}"
+                    memory: "{{ memory_per_node }}"
+                    nvidia.com/gpu: "{{ gpus_per_node }}"
+                env:
+                  {%- for k, v in env_vars.items() %}
+                  - {name: "{{ k }}", value: "{{ v }}"}
+                  {%- endfor %}
+                  {%- for s in env_from_secrets %}
+                  - name: "{{ s.name }}"
+                    valueFrom:
+                      secretKeyRef:
+                        name: "{{ s.secret }}"
+                        key: "{{ s.key }}"
+                  {%- endfor %}
+                  # NCCL sane defaults for Ethernet fabric; manifest launcher.env wins.
+                  {%- if "NCCL_IB_DISABLE" not in env_vars %}
+                  - {name: NCCL_IB_DISABLE,     value: "1"}
+                  {%- endif %}
+                  {%- if "NCCL_SOCKET_IFNAME" not in env_vars %}
+                  - {name: NCCL_SOCKET_IFNAME,  value: "^lo,docker0"}
+                  {%- endif %}
+                  {%- if "NCCL_ASYNC_ERROR_HANDLING" not in env_vars %}
+                  - {name: NCCL_ASYNC_ERROR_HANDLING, value: "1"}
+                  {%- endif %}
+                volumeMounts:
+                  - {name: raytrain-payload, mountPath: /raytrain}
+                  - {name: dshm,             mountPath: /dev/shm}
+                  - {name: ray-cache,        mountPath: /mnt/ray-cache}
+                  - {name: ray-spill,        mountPath: /mnt/ray-spill}
+            volumes:
+              - name: raytrain-payload
+                configMap:
+                  name: {{ payload_configmap }}
+              - name: dshm
+                emptyDir: {medium: Memory, sizeLimit: "{{ shm_size }}"}
+              - name: ray-cache
+                hostPath: {path: /data4/ray-cache, type: DirectoryOrCreate}
+              - name: ray-spill
+                hostPath: {path: /data3/ray-spill, type: DirectoryOrCreate}
+{% if cpu_workers > 0 %}
+      # --- cpu-worker group for Ray Data transforms (decode / augment) ---
+      - groupName: cpu-workers
+        replicas: {{ cpu_workers }}
+        minReplicas: 0
+        maxReplicas: {{ cpu_workers * 2 }}
+        rayStartParams:
+          num-gpus: "0"
+          num-cpus: "8"
+          object-store-memory: "10000000000"
+        template:
+          metadata:
+            labels:
+              raytrain.role: cpu-worker
+              raytrain.owner: {{ user }}
+          spec:
+            serviceAccountName: {{ service_account }}
+            restartPolicy: Never
+            containers:
+              - name: ray-worker
+                image: {{ image }}
+                imagePullPolicy: Always
+                resources:
+                  requests: {cpu: "8", memory: "32Gi"}
+                  limits:   {cpu: "8", memory: "32Gi"}
+                env:
+                  {%- for k, v in env_vars.items() %}
+                  - {name: "{{ k }}", value: "{{ v }}"}
+                  {%- endfor %}
+                  {%- for s in env_from_secrets %}
+                  - name: "{{ s.name }}"
+                    valueFrom:
+                      secretKeyRef:
+                        name: "{{ s.secret }}"
+                        key: "{{ s.key }}"
+                  {%- endfor %}
+                volumeMounts:
+                  - {name: raytrain-payload, mountPath: /raytrain}
+                  - {name: dshm,             mountPath: /dev/shm}
+                  - {name: ray-cache,        mountPath: /mnt/ray-cache}
+                  - {name: ray-spill,        mountPath: /mnt/ray-spill}
+            volumes:
+              - name: raytrain-payload
+                configMap:
+                  name: {{ payload_configmap }}
+              - name: dshm
+                emptyDir: {medium: Memory, sizeLimit: "16Gi"}
+              - name: ray-cache
+                hostPath: {path: /data4/ray-cache, type: DirectoryOrCreate}
+              - name: ray-spill
+                hostPath: {path: /data3/ray-spill, type: DirectoryOrCreate}
+{% endif %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ job_name }}-dashboard
+  namespace: {{ namespace }}
+  labels:
+    raytrain.owner: {{ user }}
+    raytrain.run_id: "{{ mlflow_run_id }}"
+spec:
+  type: NodePort
+  selector:
+    ray.io/cluster-name: {{ job_name }}
+    ray.io/node-type: head
+  ports:
+    - name: client
+      port: 10001
+      targetPort: 10001
+    - name: dashboard
+      port: 8265
+      targetPort: 8265
+    - name: gcs
+      port: 6379
+      targetPort: 6379
+    - name: serve-dashboard
+      port: 8080
+      targetPort: 8080
+    - name: serve-http
+      port: 8000
+      targetPort: 8000

@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: raytrain-system
+  labels:
+    raytrain.io/component: control-plane
+    raytrain.io/managed: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: raytrain-shared
+  labels:
+    raytrain.io/component: ray-cluster
+    raytrain.io/managed: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: raytrain-workspaces
+  labels:
+    raytrain.io/component: workspaces
+    raytrain.io/managed: "true"

@@ -1,0 +1,37 @@
+# One-shot apply for the entire control plane + web frontend:
+#
+#   kubectl apply -k raytrain-server/deploy/
+#
+# This now also pulls in the frontend (../../raytrain-web/deploy/web.yaml), so
+# a single apply brings up server + web + postgres + shared RayCluster.
+#
+# Make sure you've replaced the placeholders in secret-jwt-key.yaml first
+# (RAYTRAIN_JWT_SECRET, MinIO creds).
+#
+# raycluster-shared-h20.yaml is included so a new env can be bootstrapped
+# in one command. If your cluster doesn't have h20 nodes yet, comment it
+# out and apply it later.
+#
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - secret-jwt-key.yaml
+  - postgres.yaml
+  - configmap.yaml
+  - service.yaml
+  - deployment.yaml
+  - raycluster-shared-h20.yaml
+  # Frontend (lives under raytrain-web/). Referenced by relative path so a
+  # single `kubectl apply -k raytrain-server/deploy/` brings up web + server.
+  - ../../raytrain-web/deploy/web.yaml
+
+# Common labels applied to every resource so audits / list filters work
+# uniformly.
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/name: raytrain
+      app.kubernetes.io/managed-by: kustomize

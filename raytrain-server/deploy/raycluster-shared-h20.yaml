@@ -1,0 +1,140 @@
+# Long-lived shared RayCluster for h20 GPU pool.
+#
+# How it works:
+#   - autoscaler keeps min=0 worker replicas when idle (no GPU waste)
+#   - new submissions trigger autoscaler to spin up GPU workers up to maxReplicas
+#   - workers come pre-loaded with ray[data] + pylance + raytrain.data so user
+#     code (delivered via runtime_env.working_dir) can `read_lance(...)` directly
+#
+# Apply once; raytrain-server forwards every job-submission API call to the
+# Ray dashboard at ray-shared-h20-head.raytrain-shared.svc:8265.
+#
+# Sized for a 4-node cluster (h20×4); tune replicas to your real GPU count.
+#
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: ray-shared-h20
+  namespace: raytrain-shared
+  labels:
+    raytrain.io/managed: "true"
+    raytrain.io/cluster: "shared"
+    raytrain.io/gpu_type: "h20"
+spec:
+  rayVersion: "2.54.1"
+  enableInTreeAutoscaling: true
+  autoscalerOptions:
+    upscalingMode: Default
+    idleTimeoutSeconds: 60
+    resources:
+      requests: {cpu: "200m", memory: "256Mi"}
+      limits:   {cpu: "500m", memory: "512Mi"}
+
+  # ----------- Head ------------
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+      num-gpus: "0"
+    template:
+      metadata:
+        labels:
+          raytrain.io/role: head
+          raytrain.io/cluster: shared
+          raytrain.io/gpu_type: h20
+      spec:
+        restartPolicy: Always
+        containers:
+          - name: ray-head
+            # Replace with your env-only image (no training code baked in).
+            image: 172.31.9.104:5050/raytrain/raytrain-base-env:ray2.54.1-cu124-v1
+            imagePullPolicy: IfNotPresent
+            resources:
+              requests: {cpu: "1", memory: "4Gi"}
+              limits:   {cpu: "2", memory: "8Gi"}
+            env:
+              - name: RAY_DISABLE_DOCKER_CPU_WARNING
+                value: "1"
+              - name: PYTHONUNBUFFERED
+                value: "1"
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+        volumes:
+          - name: dshm
+            emptyDir: {medium: Memory, sizeLimit: 4Gi}
+
+  # ----------- Workers (h20 GPU pool) ------------
+  workerGroupSpecs:
+    - groupName: gpu-workers
+      replicas: 0
+      minReplicas: 0
+      maxReplicas: 16
+      rayStartParams:
+        # Each pod = 1 worker; per-pod GPU is 8 by convention. Adjust to your nodes.
+        num-gpus: "8"
+      template:
+        metadata:
+          labels:
+            raytrain.io/role: worker
+            raytrain.io/cluster: shared
+            raytrain.io/gpu_type: h20
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            gpu: "h20"
+          containers:
+            - name: ray-worker
+              image: 172.31.9.104:5050/raytrain/raytrain-base-env:ray2.54.1-cu124-v1
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  cpu: "32"
+                  memory: "256Gi"
+                  nvidia.com/gpu: "8"
+                limits:
+                  cpu: "32"
+                  memory: "256Gi"
+                  nvidia.com/gpu: "8"
+              env:
+                # NCCL defaults — manifest.launcher.env can still override.
+                - {name: NCCL_IB_DISABLE,            value: "1"}
+                - {name: NCCL_SOCKET_IFNAME,         value: "^lo,docker0"}
+                - {name: NCCL_ASYNC_ERROR_HANDLING,  value: "1"}
+                - {name: PYTHONUNBUFFERED,           value: "1"}
+              volumeMounts:
+                - {name: dshm,      mountPath: /dev/shm}
+                - {name: ray-cache, mountPath: /mnt/ray-cache}
+                - {name: ray-spill, mountPath: /mnt/ray-spill}
+          volumes:
+            - name: dshm
+              emptyDir: {medium: Memory, sizeLimit: "32Gi"}
+            - name: ray-cache
+              hostPath: {path: /data4/ray-cache, type: DirectoryOrCreate}
+            - name: ray-spill
+              hostPath: {path: /data3/ray-spill, type: DirectoryOrCreate}
+
+---
+# Headless service for in-cluster lookup (raytrain-server reaches it via DNS)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ray-shared-h20-head
+  namespace: raytrain-shared
+  labels:
+    raytrain.io/cluster: "shared"
+    raytrain.io/gpu_type: "h20"
+spec:
+  type: ClusterIP
+  selector:
+    ray.io/cluster: ray-shared-h20
+    ray.io/node-type: head
+  ports:
+    - name: dashboard       # Ray Job Submission API
+      port: 8265
+      targetPort: 8265
+    - name: client          # Ray Client
+      port: 10001
+      targetPort: 10001
+    - name: gcs
+      port: 6379
+      targetPort: 6379

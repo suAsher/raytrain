@@ -1,0 +1,99 @@
+# raytrain Workspace image (CPU base).
+#
+# 用户的浏览器开发机。把 4 种 IDE + raytrain CLI 全烤进来，用户零安装：
+#   - Jupyter Lab        (8888)
+#   - code-server (VSCode)(8080)
+#   - PyCharm Projector  (8887, 可选，licensing 自理)
+#   - sshd               (22)
+#   - raytrain CLI       (在终端里直接 `raytrain submit`)
+#
+# 用户从不 `pip install raytrain` —— 它在这个镜像里。
+#
+# 构建（build context = raytrain/ 仓库根）：
+#   docker build \
+#       -f deploy/Dockerfile.workspace-cpu \
+#       --build-arg INSTALL_PYCHARM=false \
+#       -t 172.31.9.104:5050/raytrain/raytrain-workspace:cpu-base-v1 \
+#       .
+#   docker push 172.31.9.104:5050/raytrain/raytrain-workspace:cpu-base-v1
+#
+# 这个 tag 要和 raytrain-server settings.workspace_image 一致。
+#
+FROM python:3.11-slim
+
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+ARG INSTALL_PYCHARM=false
+ARG WORKSPACE_USER=raytrain
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# --- system deps: ssh, supervisor, build basics, node (for code-server) ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssh-server \
+        supervisor \
+        tini \
+        curl \
+        git \
+        ca-certificates \
+        procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/run/sshd
+
+# --- code-server (browser VS Code) ---
+RUN curl -fsSL https://code-server.dev/install.sh | sh
+
+# --- python: jupyter + raytrain runtime deps ---
+RUN python -m pip install \
+        --index-url ${PIP_INDEX_URL} \
+        --trusted-host ${PIP_TRUSTED_HOST} \
+        --timeout 120 --retries 10 \
+        jupyterlab \
+        "ray[data]==2.54.1" \
+        "pylance>=0.20" \
+        "pyarrow>=15.0" \
+        "minio>=7.2" \
+        "click>=8.1" \
+        "pyyaml>=6.0" \
+        "jinja2>=3.1" \
+        "pathspec>=0.11" \
+        "httpx>=0.27" \
+        "kubernetes>=27.0" \
+        "rich>=13.0"
+
+# --- optional: PyCharm Projector ---
+RUN if [ "${INSTALL_PYCHARM}" = "true" ]; then \
+        python -m pip install projector-installer && \
+        echo "projector installed (run `projector install` at runtime to pick IDE)"; \
+    else \
+        echo "skipping PyCharm/Projector (INSTALL_PYCHARM=false)"; \
+    fi
+
+# --- bake raytrain CLI into the image (user never pip-installs it) ---
+COPY . /opt/raytrain
+RUN python -m pip install /opt/raytrain
+
+# --- workspace user + home ---
+RUN useradd -m -s /bin/bash -u 10001 ${WORKSPACE_USER} || true
+
+# --- IDE start scripts + supervisord conf ---
+COPY deploy/workspace/start-jupyter.sh      /opt/raytrain-workspace/start-jupyter.sh
+COPY deploy/workspace/start-code-server.sh  /opt/raytrain-workspace/start-code-server.sh
+COPY deploy/workspace/start-pycharm.sh      /opt/raytrain-workspace/start-pycharm.sh
+COPY deploy/workspace/start-sshd.sh         /opt/raytrain-workspace/start-sshd.sh
+COPY deploy/workspace/supervisord.conf      /etc/supervisor/conf.d/raytrain.conf
+RUN chmod +x /opt/raytrain-workspace/*.sh
+
+# --- self-check: raytrain CLI + IDEs present ---
+RUN python -c "import raytrain, ray, ray.data, lance, jupyterlab; print('workspace image OK')" \
+    && code-server --version \
+    && which sshd supervisord
+
+EXPOSE 8888 8080 8887 22
+
+# tini as PID 1 → supervisord manages the 4 services.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/raytrain.conf", \
+     "-n"]

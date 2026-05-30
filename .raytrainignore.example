@@ -1,0 +1,33 @@
+# Example .raytrainignore
+#
+# Copy to .raytrainignore at the repo root. Same syntax as .gitignore.
+# Patterns here are *added on top of* raytrain's built-in defaults
+# (.git/, __pycache__/, data/, *.ckpt, etc.) and any .gitignore in the repo.
+#
+# Anything matched here is excluded from the code zip uploaded to MinIO
+# when you run `raytrain submit`.
+#
+# Use it for things specific to your project that built-in defaults don't
+# catch:
+
+# experiment outputs unique to your project
+outputs/
+runs/
+results/
+
+# big artifacts you don't want shipped
+*.onnx
+*.bin
+
+# auto-generated docs / coverage
+htmlcov/
+docs/_build/
+
+# weights & biases / tensorboard
+wandb/
+mlruns/
+events.out.tfevents.*
+
+# data files specific to the repo
+*.parquet
+*.feather

@@ -1,0 +1,69 @@
+# raytrain-user Role
+#
+# 这是 raytrain 用户在某个 namespace 内能做的事情的最小集合。
+# 每个 namespace 都需要 apply 一份；通常 bootstrap-namespace.sh 会替你做这件事。
+#
+# 设计原则：
+#   - 只覆盖 raytrain CLI / driver 实际用到的资源
+#   - namespace-scoped：换 ns 就要重新 apply 一份（这是 K8s Role 的天然限制，
+#     正是这点保证了"只能在固定 namespace 操作"）
+#   - 不放任何 cluster-scoped 权限（不能 list nodes / namespaces / 改 RBAC）
+#
+# raytrain 各命令对资源的实际依赖：
+#   submit:       rayjobs(create) + configmaps(create) + secrets(create) + services(read)
+#   list:         rayjobs(list)
+#   stop:         rayjobs(delete) + configmaps(delete) + secrets(delete) + services(delete)
+#   logs:         pods(list) + pods/log(get)
+#   exec:         pods(list) + pods/exec(create)
+#   mlflow <job>: rayjobs(get)
+#
+# 注意 secrets 这里给到 list/get 是受限的：raytrain 创建的 Secret 命名是
+# `raytrain-creds-{job_name}`，这个 Role 没法用 resourceNames 通配限制只读自己的
+# Secret（K8s RBAC 不支持前缀匹配）。如果对跨用户读取敏感，建议用 admission
+# webhook 或者 NetworkPolicy 进一步隔离；最简洁的工程实现是相信 namespace 内
+# 同事互信。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: raytrain-user
+  # namespace 由 kubectl apply -n <ns> 时注入，不在文件里写死
+rules:
+  # KubeRay CRD：raytrain 提交/查询/删除任务的核心资源
+  - apiGroups: ["ray.io"]
+    resources: ["rayjobs", "rayclusters"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ConfigMap：raytrain 用 raytrain-payload-<job> 携带 manifest+plan
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Secret：raytrain 用 raytrain-creds-<job> 携带 MinIO/MLflow 凭据
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Pod 信息（list 用于 raytrain logs / exec 找 pod；watch 用于 wait_for_head_pod）
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Pod 日志（raytrain logs）
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+
+  # Pod exec（raytrain exec 走的是 kubectl exec，需要这个权限）
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+
+  # Service：raytrain 模板里的 dashboard Service，submit 后查询 NodePort
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+
+  # Events：故障排查需要看到 K8s 事件
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
