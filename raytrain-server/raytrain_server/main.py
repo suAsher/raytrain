@@ -14,7 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api import auth as auth_api
 from .api import admin_users as admin_users_api
+from .api import admin_resources as admin_resources_api
 from .api import code as code_api
+from .api import console as console_api
 from .api import datasets as datasets_api
 from .api import devsessions as devsessions_api
 from .api import health as health_api
@@ -24,6 +26,30 @@ from .core.bootstrap import configure_persistence
 from .core.reclaim import ReclaimLoop
 from .core.settings import Settings, get_settings
 from .core.store import get_devsession_store
+
+
+def _bootstrap_admin(s: Settings) -> None:
+    """Create a username/password admin on startup if configured and absent."""
+    if not s.bootstrap_admin_password:
+        return
+    import logging as _logging
+    from .core.users import UserRecord, get_user_store, hash_password
+
+    store = get_user_store()
+    if store.get(s.bootstrap_admin_user) is not None:
+        return
+    store.create(
+        UserRecord(
+            user=s.bootstrap_admin_user,
+            tenant="default",
+            role="admin",
+            password_hash=hash_password(s.bootstrap_admin_password),
+        )
+    )
+    _logging.getLogger(__name__).info(
+        "bootstrapped admin user %r (change the password after first login)",
+        s.bootstrap_admin_user,
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -40,6 +66,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         # Wire SQL persistence if configured (else in-memory).
         configure_persistence(s)
+        # Bootstrap a username/password admin so a fresh platform has a login
+        # without exec-ing into the pod (no-op if disabled or already present).
+        _bootstrap_admin(s)
+        # Seed demo job records so the console isn't empty on first boot.
+        if s.seed_demo:
+            from .core.seed import seed_demo_jobs
+
+            seed_demo_jobs()
         # Start the DevSession reclaim loop. reclaim_once is a no-op when
         # nothing has expired, so it's safe to always run.
         loop = ReclaimLoop(get_devsession_store(), s, interval_s=60)
@@ -72,6 +106,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_api.router)
     app.include_router(auth_api.router)
     app.include_router(admin_users_api.router)
+    app.include_router(admin_resources_api.router)
+    app.include_router(console_api.router)
     app.include_router(code_api.router)
     app.include_router(jobs_api.router)
     app.include_router(workspaces_api.router)

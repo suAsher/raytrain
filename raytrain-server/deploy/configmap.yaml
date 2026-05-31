@@ -31,3 +31,9 @@ data:
   RAYTRAIN_SERVER_HOST: "0.0.0.0"
   RAYTRAIN_SERVER_PORT: "8080"
   RAYTRAIN_LOG_LEVEL: "INFO"
+
+  # Bootstrap admin for first browser login (username/password). Set the
+  # password via a Secret in production, then remove after first login.
+  RAYTRAIN_BOOTSTRAP_ADMIN_USER: "admin"
+  # RAYTRAIN_BOOTSTRAP_ADMIN_PASSWORD: set in the raytrain-jwt-key Secret or a
+  # dedicated Secret; do NOT commit a real password here.

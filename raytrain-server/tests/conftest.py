@@ -32,6 +32,7 @@ def settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[Settings]:
     monkeypatch.setenv("RAYTRAIN_CODE_BUCKET", "raytrain-code")
     monkeypatch.setenv("RAYTRAIN_WORKSPACE_BASE_DOMAIN", "raytrain.example.com")
     monkeypatch.setenv("RAYTRAIN_IN_CLUSTER", "false")
+    monkeypatch.setenv("RAYTRAIN_SEED_DEMO", "false")
     get_settings.cache_clear()
     s = get_settings()
     yield s

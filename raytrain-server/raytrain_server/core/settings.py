@@ -89,6 +89,17 @@ class Settings(BaseSettings):
     #   postgresql://user:pass@host:5432/raytrain
     database_url: str = ""
 
+    # Seed demonstrative job records on first boot so the console isn't empty.
+    # Set false in production once real submissions exist.
+    seed_demo: bool = True
+
+    # Bootstrap admin (so a fresh platform has a username/password login without
+    # exec-ing into the pod). If password is set and the user doesn't exist, it
+    # is created with role=admin on startup. Change the password after first
+    # login; set an empty password in prod to disable auto-bootstrap.
+    bootstrap_admin_user: str = "admin"
+    bootstrap_admin_password: str = ""
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

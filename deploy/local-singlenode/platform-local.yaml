@@ -49,6 +49,10 @@ data:
   RAYTRAIN_SERVER_HOST: "0.0.0.0"
   RAYTRAIN_SERVER_PORT: "8080"
   RAYTRAIN_LOG_LEVEL: "INFO"
+  # Bootstrap admin so you can log in with username/password right away.
+  # LOCAL ONLY — change for anything real.
+  RAYTRAIN_BOOTSTRAP_ADMIN_USER: "admin"
+  RAYTRAIN_BOOTSTRAP_ADMIN_PASSWORD: "admin12345"
   # DATABASE_URL intentionally unset -> in-memory store.
 ---
 apiVersion: apps/v1
@@ -147,7 +151,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: raytrain/raytrain-web:local
+          image: raytrain/raytrain-console:local
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80

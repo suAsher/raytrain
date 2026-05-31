@@ -11,7 +11,7 @@
 ## 1. 平台由三块组成（先搞清楚，别被 token 绕晕）
 
 ```
-浏览器 ──登录(账号)──▶ raytrain-web (前端 SPA, React/AntD)
+浏览器 ──登录(账号)──▶ raytrain-console (前端 SPA, React/Tailwind 工作台)
                           │ /v1/* 反代
                           ▼
                      raytrain-server (后端控制面, FastAPI)
@@ -22,7 +22,7 @@
 
 | 组件 | 目录 | 作用 |
 | --- | --- | --- |
-| 前端 | `raytrain-web/` | 浏览器界面：登录、工作区、开发机、提交任务、任务列表、数据集 |
+| 前端 | `raytrain-console/` | 浏览器训练工作台：Overview / Jobs / Create Job / Job Detail / Queues / Experiments / Artifacts / Datasets / Admin |
 | 后端 | `raytrain-server/` | 鉴权、任务编排、调 KubeRay/MinIO/Ray、配额/租户隔离 |
 | CLI（可选） | `raytrain/` | 命令行提交，给不想用浏览器的人 |
 
@@ -79,14 +79,14 @@ curl -fsS -H "Authorization: Bearer $TOK" http://127.0.0.1:8099/v1/auth/me
 ### 3.2 起前端
 
 ```bash
-cd raytrain-web
+cd raytrain-console
 npm install          # 首次
-npm run dev          # vite dev server，默认 http://localhost:5173
+npm run dev          # vite dev server，默认 http://localhost:5174
 ```
 
-浏览器打开 `http://localhost:5173`，登录页粘贴上面的 `$TOK` 即可进入界面。
-（前端 `/v1` 请求要能到后端：dev 模式下配 vite 代理到 `127.0.0.1:8099`，
-或先 `npm run build` 用 nginx 镜像跑——生产用第 4 节。）
+浏览器打开 `http://localhost:5174`，登录页粘贴上面的 `$TOK` 即可进入界面。
+（`vite.config.ts` 已把 `/v1` 代理到 `127.0.0.1:8099`，所以本地起了后端就能直接联调；
+生产由 nginx 反代，见第 4 节。）
 
 ---
 
@@ -137,49 +137,78 @@ curl -fsS http://<任一节点IP>:30810/healthz
 > 若集群还没有 h20 GPU 节点，先在 `deploy/kustomization.yaml` 注释掉
 > `raycluster-shared-h20.yaml`，等集群就绪再单独 apply。
 
-### 4.2 前端 raytrain-web
+### 4.2 前端 raytrain-console
 
-前端镜像是**多阶段构建**：`npm ci && npm run build` 在镜像内部的 `node:20` 阶段
-执行，产物拷进 nginx。所以**部署机不需要装 node/npm**，一条 `docker build` 即可。
+平台的 Web 前端是 **`raytrain-console`**（训练任务工作台：Overview / Jobs / Create Job
+五步向导 / Job Detail 多 Tab / Queues / Experiments / Artifacts / Datasets / Admin）。
+镜像是**多阶段构建**：`npm ci && npm run build` 在镜像内部的 `node:20` 阶段执行，产物
+拷进 nginx。所以**部署机不需要装 node/npm**，一条 `docker build` 即可。
 
 ```bash
-cd raytrain-web
-docker build -t 172.31.9.104:5050/raytrain/raytrain-web:v0.1 .   # 内部自动 npm build
-docker push 172.31.9.104:5050/raytrain/raytrain-web:v0.1
+cd raytrain-console
+docker build -t 172.31.9.104:5050/raytrain/raytrain-console:v0.1 .   # 内部自动 npm build
+docker push 172.31.9.104:5050/raytrain/raytrain-console:v0.1
 ```
 
-> 前端的 K8s 清单（`raytrain-web/deploy/web.yaml`，NodePort 30880）已被
-> `raytrain-server/deploy/kustomization.yaml` 收录，所以**不用单独 apply**——
-> 上一步 §4.1 的 `kubectl apply -k deploy/` 已经把前端一起部署了。只需构建并推送镜像即可。
+> 前端的 K8s 清单（`raytrain-console/deploy/web.yaml`，Deployment/Service 名仍为
+> `raytrain-web`，NodePort 30880）已被 `raytrain-server/deploy/kustomization.yaml`
+> 收录，所以**不用单独 apply**——上一步 §4.1 的 `kubectl apply -k deploy/` 已经把前端
+> 一起部署了。只需构建并推送镜像即可。
 
-`raytrain-web` 的 nginx 把 `/v1` 反代到 `raytrain-server` 的 ClusterIP（见
-`raytrain-web/nginx.conf`），所以前端只暴露一个入口。
+`raytrain-console` 的 nginx 把 `/v1` 反代到 `raytrain-server` 的 ClusterIP（见
+`raytrain-console/nginx.conf`），所以前端只暴露一个入口。
 
-### 4.3 给第一个用户发 token（一次性引导，仅此一次进 pod）
+#### 页面与后端的对接情况
+console 各页面均由后端真实接口驱动（`/v1/console/*` + `/v1/auth`、`/v1/datasets`）：
+- **Overview / Training Jobs / Job Detail / Queues / Experiments / Artifacts**：读
+  `/v1/console/*`，由 `raytrain-server` 的 JobStore / QueueStore 提供，含时间线、
+  Pods、Events、Logs、Metrics、Artifacts（按 job 确定性派生）。
+- **Create Job / Cancel / Retry**：写 `/v1/console/jobs*`，落库为平台 job 记录。
+- **登录 / 身份**：`/v1/auth/me`；**Datasets**：`/v1/datasets`。
+- 首次启动后端会**种入一批示例 job**（`RAYTRAIN_SEED_DEMO=true`，生产可设 false），
+  让控制台开箱即有内容；真实提交会与之并列。
+- 真正把训练**跑到 GPU 集群**仍需配置 `SHARED_CLUSTERS` + KubeRay（见 §4.1）。仅当
+  后端整体不可达时，前端顶部才会显示「演示数据」降级提示。
 
-平台刚起来时数据库里还没有任何用户，无法在浏览器里登录去创建用户。所以**首次**用
-`kubectl exec` 进后端 pod 签发一个**管理员** token：
+### 4.3 第一个管理员登录（账号密码，推荐）
+
+平台支持**账号密码登录**：登录页默认就是用户名 + 密码（也保留「令牌登录」作为
+自动化/CLI 旁路）。为了让全新平台开箱即有一个可登录的管理员，后端支持**引导管理员**——
+通过环境变量在启动时自动创建一个 `admin` 账号：
+
+```yaml
+# 在 raytrain-server/deploy/configmap.yaml（或 Secret 更稳妥）里设置：
+RAYTRAIN_BOOTSTRAP_ADMIN_USER: "admin"
+RAYTRAIN_BOOTSTRAP_ADMIN_PASSWORD: "<改成强密码>"   # 建议放 Secret，不要明文进 ConfigMap
+```
+
+部署后浏览器打开平台 → 用 `admin` + 该密码登录 → 进入 **Admin · 用户** 创建其他用户
+并为他们**设置密码**（用户即可账号密码登录）。**首次登录后请立刻改密码**，并把
+`RAYTRAIN_BOOTSTRAP_ADMIN_PASSWORD` 从配置里移除（已存在的账号不会被重复创建）。
+
+> 密码以 PBKDF2-HMAC-SHA256 加盐哈希存库（`users.password_hash`），不可逆、不回显。
+> 登录成功后端签发 JWT，前端自动保存并在后续请求中带上——用户不再手贴 token。
+
+#### 备选：CLI 签发令牌（自动化 / 不想用密码时）
 
 ```bash
 kubectl -n raytrain-system exec deploy/raytrain-server -- \
     raytrain-issue-token alice --role admin --days 365
 ```
 
-把 token 给 alice → 她浏览器打开 `http://<节点IP>:30880` → 登录页粘贴 token → 进平台。
-
-> **此后不再进 pod。** alice（管理员）在浏览器「用户管理」里创建其他用户、分配配额与
-> 授权、签发各自的 token。配额/权限修改即时生效，无需重发 token。
+把 token 交给用户，在登录页切到「令牌登录」粘贴即可。
 
 ---
 
 ## 5. 最终效果（用户怎么用）
 
-1. 浏览器打开平台地址，登录（粘贴 token，未来可接 SSO）。
-2. **工作区 / 开发机**：申请一台带 GPU 的开发机调试代码（DevSessions 页）。
-3. **提交任务**：Submit 页填训练意图（镜像/命令/GPU 数/数据集），平台自动打包当前代码 →
-   上传 MinIO → 投递到长寿 RayCluster。**改完代码直接提交就能跑，不构建镜像。**
-4. **任务列表 / 日志 / 数据集**：在界面看状态、日志、指标。
-5. 管理员：配额、租户隔离、权限（token 的 role/tenant claim 控制）。
+1. 浏览器打开平台地址，**账号密码登录**（管理员发的用户名/密码；自动化可用令牌登录）。
+2. **Overview / Training Jobs**：看运行/排队/失败/成功概览与任务列表。
+3. **Create Job**：5 步向导填训练意图（镜像/命令/GPU/数据集/挂载），实时资源估算 +
+   校验；提交后落库为平台 job 记录。**改完代码直接提交就能跑，不构建镜像。**
+4. **Job Detail**：状态时间线、日志、事件、Pods、指标、Config、Artifacts，可互相跳转。
+5. **Queues / Experiments / Artifacts / Datasets**：队列资源、实验复现、产物、数据挂载。
+6. 管理员：在 Admin 创建用户、设密码、分配 per-user 配额与授权（即时生效）。
 
 ---
 
@@ -190,7 +219,7 @@ kubectl -n raytrain-system exec deploy/raytrain-server -- \
 cd raytrain-server && pip install -e ".[dev]" && pytest tests/ -q
 
 # 前端类型检查 + 构建
-cd raytrain-web && npm run build
+cd raytrain-console && npm run build
 
 # 后端起不来 → 看日志
 kubectl -n raytrain-system logs deploy/raytrain-server --tail=50
@@ -207,9 +236,9 @@ kubectl -n raytrain-system logs deploy/raytrain-server --tail=50
 ## 7. 与 CLI 路线的关系
 
 `raytrain/`（CLI）和这套平台是**同一后端的两个入口**：
-- 浏览器用户 → `raytrain-web` → `raytrain-server`
+- 浏览器用户 → `raytrain-console` → `raytrain-server`
 - CLI 用户 → `raytrain submit --cluster-mode shared` → 同一个 `raytrain-server`
 
 两者都用 token 鉴权、都走 code-as-submission。**你要的"完整训练平台"= raytrain-server +
-raytrain-web**，CLI 只是给习惯命令行的人留的旁路。CLI 侧的演进细节见
+raytrain-console**，CLI 只是给习惯命令行的人留的旁路。CLI 侧的演进细节见
 `docs/end-to-end-runbook.md` 与 `docs/migration-shared-cluster.md`。

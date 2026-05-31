@@ -2,7 +2,7 @@
 
 > **📖 找文档？先看 [`docs/README.md`](docs/README.md) —— 文档总导航，按「我想做什么」对号入座。**
 >
-> 本仓库有两层：**平台**（浏览器：`raytrain-server` + `raytrain-web`，当前主线）和
+> 本仓库有两层：**平台**（浏览器：`raytrain-server` + `raytrain-console`，当前主线）和
 > **CLI**（命令行 `raytrain submit`，同源旁路）。
 > - 部署平台 → [`docs/platform-deploy.md`](docs/platform-deploy.md)
 > - 单节点快速验证 → [`deploy/local-singlenode/README.md`](deploy/local-singlenode/README.md)
@@ -790,8 +790,8 @@ raytrain/
 │   │   ├── core/              # jwt_auth / quota / users / sql_store / k8s / ray / minio
 │   │   └── training/          # 提交编排
 │   └── deploy/                # 生产部署清单（kustomization：ns/sa/secret/pg/cm/svc/deploy/raycluster）
-├── raytrain-web/              # 平台前端（React + TypeScript + Ant Design）
-│   ├── src/                   # pages / components / api
+├── raytrain-console/          # 平台前端（React + TypeScript + Tailwind 工作台）
+│   ├── src/                   # pages / components / lib (api + mock)
 │   └── deploy/                # 前端部署清单（web.yaml）
 ├── deploy/                    # 集群基础设施脚本 + 共享集群清单
 │   ├── local-singlenode/      # 单节点快速验证包

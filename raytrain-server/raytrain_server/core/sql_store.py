@@ -282,6 +282,7 @@ class SqlUserStore:
             datasets=loads(row["datasets"]) or [],
             image_prefixes=loads(row["image_prefixes"]) or [],
             enabled=bool(row["enabled"]),
+            password_hash=(row["password_hash"] if "password_hash" in row.keys() else "") or "",
             created_at=row["created_at"] or time.time(),
             updated_at=row["updated_at"] or time.time(),
         )
@@ -291,12 +292,12 @@ class SqlUserStore:
             raise ValueError(f"user {rec.user!r} already exists")
         self._db.execute(
             'INSERT INTO users ("user",tenant,role,quota,projects,queues,'
-            "datasets,image_prefixes,enabled,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "datasets,image_prefixes,enabled,password_hash,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (rec.user, rec.tenant, rec.role, dumps(rec.quota.to_dict()),
              dumps(rec.projects), dumps(rec.queues), dumps(rec.datasets),
              dumps(rec.image_prefixes), 1 if rec.enabled else 0,
-             rec.created_at, rec.updated_at),
+             rec.password_hash, rec.created_at, rec.updated_at),
         )
         return rec
 
@@ -313,11 +314,12 @@ class SqlUserStore:
         rec.updated_at = time.time()
         self._db.execute(
             'UPDATE users SET tenant=?,role=?,quota=?,projects=?,queues=?,'
-            'datasets=?,image_prefixes=?,enabled=?,updated_at=? WHERE "user"=?',
+            'datasets=?,image_prefixes=?,enabled=?,password_hash=?,updated_at=? '
+            'WHERE "user"=?',
             (rec.tenant, rec.role, dumps(rec.quota.to_dict()),
              dumps(rec.projects), dumps(rec.queues), dumps(rec.datasets),
              dumps(rec.image_prefixes), 1 if rec.enabled else 0,
-             rec.updated_at, user),
+             rec.password_hash, rec.updated_at, user),
         )
         return rec
 

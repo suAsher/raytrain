@@ -2,7 +2,7 @@
 
 这个仓库有两层东西，文档也按这两层组织：
 
-1. **平台（Platform）** —— 浏览器训练平台：`raytrain-server`（后端）+ `raytrain-web`（前端）。
+1. **平台（Platform）** —— 浏览器训练平台：`raytrain-server`（后端）+ `raytrain-console`（前端）。
    用户登录网页 → 建开发机 / 提交任务 / 管理员管配额权限。**这是当前主线。**
 2. **CLI** —— 命令行提交工具 `raytrain submit`，是平台的同源旁路（同一后端、同一
    code-as-submission），给习惯命令行的人用。
@@ -16,6 +16,7 @@
 | 你的目标 | 看这篇 | 说明 |
 | --- | --- | --- |
 | **把平台部署起来（生产/集群）** | [`platform-deploy.md`](platform-deploy.md) | ⭐ 主线。构建镜像 → apply → 引导首个 admin |
+| **让训练真正跑到集群（Ray/RayData/Lance）** | [`platform-live-training.md`](platform-live-training.md) | ⭐ 配置共享集群 + code-as-submission + Lance 注入 + 开发机 |
 | **单节点快速验证平台 UI** | [`../deploy/local-singlenode/README.md`](../deploy/local-singlenode/README.md) | 一台机器跑通登录/用户/配额，不含 GPU 训练 |
 | **了解平台整体设计/架构** | [`raytrain-platform-proposal.md`](raytrain-platform-proposal.md) | 改造方案 v3（背景、架构、里程碑） |
 | **第一次用 CLI 跑训练** | [`quickstart.md`](quickstart.md) | 5 分钟跑通第一个任务 |
@@ -33,6 +34,7 @@
 | 文档 | 用途 |
 | --- | --- |
 | [`platform-deploy.md`](platform-deploy.md) | **部署指南（实测版）**：本地预览 + 集群部署 + 首个 admin 引导 |
+| [`platform-live-training.md`](platform-live-training.md) | **让训练真跑到集群**：共享集群配置、code-as-submission、Ray Data/Lance、开发机 |
 | [`raytrain-platform-proposal.md`](raytrain-platform-proposal.md) | 平台改造方案 v3（架构 / 里程碑 / 设计决策） |
 | [`../deploy/local-singlenode/README.md`](../deploy/local-singlenode/README.md) | 单节点快速验证（UI + 鉴权 + 用户/配额） |
 
@@ -76,7 +78,7 @@ raytrain/
 ├── raytrain/              # CLI（命令行提交工具）
 ├── raytrain-server/       # 平台后端（FastAPI 控制面）
 │   └── deploy/            # 生产部署清单（kustomization）
-├── raytrain-web/          # 平台前端（React + Ant Design）
+├── raytrain-console/      # 平台前端（React + Tailwind 训练工作台）
 │   └── deploy/            # 前端部署清单（web.yaml）
 ├── deploy/                # 集群基础设施脚本 + 共享集群清单
 │   └── local-singlenode/  # 单节点快速验证包（本文 A 类）
@@ -88,6 +90,6 @@ raytrain/
 三个组件的关系：
 
 ```text
-浏览器 ──▶ raytrain-web ──/v1──▶ raytrain-server ──Ray Job API──▶ 长寿 RayCluster
-CLI    ──────────────────────▶ raytrain-server ──┘（同一后端、同一 code-as-submission）
+浏览器 ──▶ raytrain-console ──/v1──▶ raytrain-server ──Ray Job API──▶ 长寿 RayCluster
+CLI    ──────────────────────────▶ raytrain-server ──┘（同一后端、同一 code-as-submission）
 ```

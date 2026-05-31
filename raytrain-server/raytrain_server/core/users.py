@@ -24,10 +24,42 @@ bootstrap.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Optional
+
+
+# --------------------------------------------------------------------------- #
+# Password hashing (stdlib PBKDF2-HMAC-SHA256; no extra dependency)
+# --------------------------------------------------------------------------- #
+
+_PBKDF2_ROUNDS = 200_000
+
+
+def hash_password(password: str, *, salt: Optional[bytes] = None) -> str:
+    """Return a self-describing hash string ``pbkdf2_sha256$rounds$salt$hash``."""
+    if salt is None:
+        salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ROUNDS)
+    return f"pbkdf2_sha256${_PBKDF2_ROUNDS}${salt.hex()}${dk.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """Constant-time verify against a hash produced by :func:`hash_password`."""
+    try:
+        scheme, rounds_s, salt_hex, hash_hex = stored.split("$")
+        if scheme != "pbkdf2_sha256":
+            return False
+        rounds = int(rounds_s)
+        salt = bytes.fromhex(salt_hex)
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, rounds)
+        return hmac.compare_digest(dk.hex(), hash_hex)
+    except (ValueError, AttributeError):
+        return False
 
 
 @dataclass
@@ -61,16 +93,25 @@ class UserRecord:
     datasets: list = field(default_factory=list)
     image_prefixes: list = field(default_factory=list)
     enabled: bool = True
+    # password_hash: PBKDF2 string (see hash_password). Empty = no password set
+    # (token-only user / legacy). Never serialized to API responses.
+    password_hash: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        # never leak the password hash through to_dict consumers
+        d.pop("password_hash", None)
         return d
 
     @property
     def is_admin(self) -> bool:
         return self.role == "admin"
+
+    @property
+    def has_password(self) -> bool:
+        return bool(self.password_hash)
 
 
 class UserStore:

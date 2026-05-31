@@ -162,6 +162,7 @@ class Database:
                 quota TEXT,
                 projects TEXT, queues TEXT, datasets TEXT, image_prefixes TEXT,
                 enabled INTEGER DEFAULT 1,
+                password_hash TEXT DEFAULT '',
                 created_at REAL, updated_at REAL
             )
             """,

@@ -18,7 +18,7 @@ state 存内存，重启 pod 会清空——这是 smoke test，正常。
 
 以及 `kubectl`、`docker`（k3s 可用其内置 `ctr`）。
 
-把整个 repo（至少 `raytrain-server/`、`raytrain-web/`、`deploy/local-singlenode/`）拷到该机器。
+把整个 repo（至少 `raytrain-server/`、`raytrain-console/`、`deploy/local-singlenode/`）拷到该机器。
 
 ---
 
@@ -28,8 +28,8 @@ state 存内存，重启 pod 会清空——这是 smoke test，正常。
 cd <repo>/raytrain-server
 docker build -t raytrain/raytrain-server:local -f Dockerfile .
 
-cd ../raytrain-web
-docker build -t raytrain/raytrain-web:local -f Dockerfile .
+cd ../raytrain-console
+docker build -t raytrain/raytrain-console:local -f Dockerfile .
 ```
 
 > web 的 `npm ci && npm run build` 在镜像内部跑，构建机不用装 node。
@@ -37,8 +37,8 @@ docker build -t raytrain/raytrain-web:local -f Dockerfile .
 确认：
 ```bash
 docker images | grep raytrain
-# raytrain/raytrain-server  local ...
-# raytrain/raytrain-web     local ...
+# raytrain/raytrain-server   local ...
+# raytrain/raytrain-console  local ...
 ```
 
 ---
@@ -51,19 +51,19 @@ docker images | grep raytrain
 ### 如果用 kind
 ```bash
 kind load docker-image raytrain/raytrain-server:local
-kind load docker-image raytrain/raytrain-web:local
+kind load docker-image raytrain/raytrain-console:local
 ```
 
 ### 如果用 minikube
 ```bash
 minikube image load raytrain/raytrain-server:local
-minikube image load raytrain/raytrain-web:local
+minikube image load raytrain/raytrain-console:local
 ```
 
 ### 如果用 k3s（镜像在 docker 里，需要导入 containerd）
 ```bash
-docker save raytrain/raytrain-server:local | sudo k3s ctr images import -
-docker save raytrain/raytrain-web:local    | sudo k3s ctr images import -
+docker save raytrain/raytrain-server:local   | sudo k3s ctr images import -
+docker save raytrain/raytrain-console:local  | sudo k3s ctr images import -
 ```
 
 ---
@@ -82,18 +82,18 @@ kubectl -n raytrain-system get pods
 
 ---
 
-## 4. 创建第一个管理员 token（一次性引导）
+## 4. 登录账号（已自动引导）
 
-数据库（这里是内存）刚起来没有任何用户，先进后端 pod 签一个 admin token：
+清单里已通过 `RAYTRAIN_BOOTSTRAP_ADMIN_USER/PASSWORD` 自动创建了管理员账号，
+**无需进 pod**：
 
-```bash
-kubectl -n raytrain-system exec deploy/raytrain-server -- \
-    raytrain-issue-token admin --role admin --days 30
+```
+用户名: admin
+密码:   admin12345     # 见 platform-local.yaml 的 ConfigMap，LOCAL ONLY
 ```
 
-输出第一行就是 token（`eyJ...`），复制下来。
-
-> 因为 secret 里 JWT 密钥是固定值，pod 内签的 token 正好被同一个 server 接受。
+> 想用令牌登录（自动化）也可以，进 pod 签一个：
+> `kubectl -n raytrain-system exec deploy/raytrain-server -- raytrain-issue-token admin --role admin --days 30`
 
 ---
 
@@ -113,11 +113,11 @@ minikube service raytrain-web -n raytrain-system --url
 #   http://<节点IP>:30880
 ```
 
-在登录页粘贴第 4 步的 token → 进入平台。
+登录页用 `admin` / `admin12345` 登录（账号密码） → 进入平台。
 
 ### 验证清单
-- [ ] 登录成功，右上角显示 `admin (admin)`
-- [ ] 左侧出现「用户管理」菜单（仅 admin 可见）
+- [ ] 账号密码登录成功，右上角显示 `admin` + admin 标记
+- [ ] Overview 有任务概览，Training Jobs 列表有种子任务
 - [ ] 用户管理 → 创建用户：填配额（GPU 上限/并发任务）+ 授权 → 提交
 - [ ] 创建成功弹出一次性 token
 - [ ] 列表出现新用户；编辑改配额能保存；删除能成功

@@ -914,7 +914,7 @@ ray-cluster-3 (legacy)         per-job RayJob（兜底，保留 6 个月）
 | 镜像 | 内容 | 频率 |
 |---|---|---|
 | `raytrain-server:vN` | Control Plane | 每 release |
-| `raytrain-web:vN` | 前端静态 | 每 release |
+| `raytrain-console:vN` | 前端静态 | 每 release |
 | `raytrain-workspace:cpu-base` | 4 IDE + Python + ray[data] + pylance + raytrain | 月级 |
 | `raytrain-workspace:gpu-pointcept` | cpu-base + CUDA + pointcept 依赖 | 月级 |
 | `raytrain-shared-cluster:vN` | 长寿 cluster 用，环境层 + ray[data] + pylance + raytrain | 月级 |

@@ -21,7 +21,7 @@ from ..core.jwt_auth import Identity, issue_token, require_admin, require_user
 from ..core.quota import Usage
 from ..core.settings import Settings, get_settings
 from ..core.store import get_devsession_store
-from ..core.users import UserQuota, UserRecord, get_user_store
+from ..core.users import UserQuota, UserRecord, get_user_store, hash_password
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +57,8 @@ class CreateUserRequest(BaseModel):
     queues: list[str] = Field(default_factory=list)
     datasets: list[str] = Field(default_factory=list)
     image_prefixes: list[str] = Field(default_factory=list)
+    # Optional: set a login password so the user can sign in with user/pass.
+    password: Optional[str] = Field(default=None, min_length=6, max_length=256)
     # Optionally mint a token in the same call so the admin can hand it over.
     issue_token: bool = False
     token_days: Optional[int] = None
@@ -73,6 +75,8 @@ class UpdateUserRequest(BaseModel):
     datasets: Optional[list[str]] = None
     image_prefixes: Optional[list[str]] = None
     enabled: Optional[bool] = None
+    # Optional: reset / set the login password.
+    password: Optional[str] = Field(default=None, min_length=6, max_length=256)
 
 
 class UserView(BaseModel):
@@ -137,6 +141,7 @@ def create_user(
         queues=body.queues,
         datasets=body.datasets,
         image_prefixes=body.image_prefixes,
+        password_hash=hash_password(body.password) if body.password else "",
         created_at=time.time(),
         updated_at=time.time(),
     )
@@ -212,6 +217,8 @@ def update_user(
         changes["image_prefixes"] = body.image_prefixes
     if body.enabled is not None:
         changes["enabled"] = body.enabled
+    if body.password is not None:
+        changes["password_hash"] = hash_password(body.password)
 
     rec = store.update(user, **changes)
     log.info("admin.user.update user=%s by=%s fields=%s",

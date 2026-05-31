@@ -2,8 +2,8 @@
 #
 #   kubectl apply -k raytrain-server/deploy/
 #
-# This now also pulls in the frontend (../../raytrain-web/deploy/web.yaml), so
-# a single apply brings up server + web + postgres + shared RayCluster.
+# This now also pulls in the frontend (../../raytrain-console/deploy/web.yaml),
+# so a single apply brings up server + web + postgres + shared RayCluster.
 #
 # Make sure you've replaced the placeholders in secret-jwt-key.yaml first
 # (RAYTRAIN_JWT_SECRET, MinIO creds).
@@ -24,9 +24,10 @@ resources:
   - service.yaml
   - deployment.yaml
   - raycluster-shared-h20.yaml
-  # Frontend (lives under raytrain-web/). Referenced by relative path so a
-  # single `kubectl apply -k raytrain-server/deploy/` brings up web + server.
-  - ../../raytrain-web/deploy/web.yaml
+  # Frontend: the raytrain-console SPA (replaces the older raytrain-web).
+  # Referenced by relative path so a single `kubectl apply -k
+  # raytrain-server/deploy/` brings up web + server.
+  - ../../raytrain-console/deploy/web.yaml
 
 # Common labels applied to every resource so audits / list filters work
 # uniformly.
