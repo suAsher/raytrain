@@ -13,15 +13,20 @@ import {
   HardDrive,
   ClipboardCheck,
   Info,
+  Loader,
 } from "lucide-react";
 import { PageHeader, Panel, Select } from "../components/primitives";
 import { GpuTypeBadge } from "../components/badges";
 import { useStore } from "../lib/store";
-import { PROJECTS, QUEUES } from "../lib/mockData";
-import { buildArtifacts, buildEvents, buildLogs, buildMetrics, buildPods, buildTimeline, iso, rayJobYaml } from "../lib/mockGen";
-import type { GpuType, Job } from "../lib/types";
-import { createJob as createJobApi } from "../lib/consoleApi";
-import { apiFetch } from "../lib/api";
+import { rayJobYaml } from "../lib/rayJobPreview";
+import type { GpuType, Job, Queue } from "../lib/types";
+import {
+  createJob as createJobApi,
+  fetchQueues,
+  fetchRuntimeImages,
+} from "../lib/consoleApi";
+import { apiFetch, errMsg } from "../lib/api";
+import { useI18n } from "../i18n";
 
 interface Draft {
   name: string;
@@ -49,26 +54,12 @@ interface Draft {
   scratchGi: number;
 }
 
-const IMAGES = [
-  "raytrain/pointcept:cu124-v3",
-  "raytrain/sslod26:cu124-v3",
-  "raytrain/occworld:cu121-v2",
-  "raytrain/nusc:cu124-v1",
-];
-
-const CONFIGS: Record<string, string[]> = {
-  pointcept: ["configs/pointcept/scannet_semseg.py", "configs/pointcept/s3dis.py", "configs/pointcept/default.py"],
-  sslod26: ["configs/sslod26/pretrain_base.py", "configs/sslod26/pretrain_large.py", "configs/sslod26/finetune.py"],
-  "occ-world": ["configs/occworld/bevformer_large.py", "configs/occworld/baseline.py"],
-  "nuscenes-det": ["configs/nusc/centerpoint.py", "configs/nusc/pillarnext.py"],
-};
-
-const STEPS = [
-  { key: "basic", label: "基础信息", icon: Info },
-  { key: "code", label: "代码与镜像", icon: Code2 },
-  { key: "resources", label: "资源", icon: Zap },
-  { key: "data", label: "数据与 checkpoint", icon: HardDrive },
-  { key: "review", label: "Review", icon: ClipboardCheck },
+const STEP_KEYS = [
+  { key: "basic", labelKey: "cj.stepBasic", icon: Info },
+  { key: "code", labelKey: "cj.stepCode", icon: Code2 },
+  { key: "resources", labelKey: "cj.stepRes", icon: Zap },
+  { key: "data", labelKey: "cj.stepData", icon: HardDrive },
+  { key: "review", labelKey: "cj.stepReview", icon: ClipboardCheck },
 ];
 
 function defaultDraft(clone?: Job): Draft {
@@ -101,14 +92,14 @@ function defaultDraft(clone?: Job): Draft {
   }
   return {
     name: "",
-    project: PROJECTS[0],
-    quotaGroup: PROJECTS[0] + "-qg",
-    queue: QUEUES[0],
+    project: "",
+    quotaGroup: "",
+    queue: "",
     priority: "normal",
     description: "",
-    image: IMAGES[0],
-    entrypoint: CONFIGS[PROJECTS[0]][0],
-    workingDir: "/workspace/" + PROJECTS[0],
+    image: "",
+    entrypoint: "",
+    workingDir: "",
     gitRef: "main",
     env: [{ key: "OMP_NUM_THREADS", value: "8" }],
     gpuType: "H20",
@@ -119,8 +110,8 @@ function defaultDraft(clone?: Job): Draft {
     headCpu: 4,
     headMemGi: 16,
     rdma: false,
-    datasetUri: "minio://datasets/" + PROJECTS[0],
-    checkpointUri: "minio://checkpoints/" + PROJECTS[0] + "-run",
+    datasetUri: "",
+    checkpointUri: "",
     checkpointShared: true,
     scratchGi: 200,
   };
@@ -128,7 +119,8 @@ function defaultDraft(clone?: Job): Draft {
 
 export function CreateJobPage() {
   const nav = useNavigate();
-  const { addJob, getJob } = useStore();
+  const { t } = useI18n();
+  const { getJob, projects } = useStore();
   const [sp] = useSearchParams();
   const cloneId = sp.get("clone");
   const cloneSrc = cloneId ? getJob(cloneId) : undefined;
@@ -137,13 +129,59 @@ export function CreateJobPage() {
   const [d, setD] = useState<Draft>(() => defaultDraft(cloneSrc));
   const set = (patch: Partial<Draft>) => setD((prev) => ({ ...prev, ...patch }));
 
-  // live resource estimation
+  // Real option sources.
+  const [queues, setQueues] = useState<Queue[]>([]);
+  const [images, setImages] = useState<string[]>([]);
+  const [optErr, setOptErr] = useState("");
+  const projectOptions = projects.filter((p) => p !== "All projects");
+
+  useEffect(() => {
+    fetchQueues().then(setQueues).catch((e) => setOptErr(errMsg(e)));
+    fetchRuntimeImages().then(setImages).catch(() => {});
+  }, []);
+
+  // Populate sensible defaults once options arrive (skip when cloning).
+  useEffect(() => {
+    if (cloneSrc) return;
+    setD((prev) => {
+      const next = { ...prev };
+      if (!next.project && projectOptions.length) {
+        next.project = projectOptions[0];
+        next.quotaGroup = projectOptions[0] + "-qg";
+        next.workingDir = "/workspace/" + projectOptions[0];
+      }
+      if (!next.image && images.length) next.image = images[0];
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectOptions.length, images.length]);
+
+  // Queues valid for the chosen gpu type (Req 9.6 — only real Kueue queues).
   const effectiveGpuType: GpuType = d.gpuType === "Auto" ? "H20" : d.gpuType;
   const isCpu = effectiveGpuType === "CPU-only";
+  const queuesForGpu = useMemo(
+    () => queues.filter((q) => q.gpuType === effectiveGpuType),
+    [queues, effectiveGpuType]
+  );
+  const queueChoices = queuesForGpu.length ? queuesForGpu : queues;
+
+  // keep the selected queue valid for the current gpu type
+  useEffect(() => {
+    if (queueChoices.length && !queueChoices.some((q) => q.name === d.queue)) {
+      set({ queue: queueChoices[0].name });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queueChoices]);
+
   const totalGpu = isCpu ? 0 : d.nodes * d.gpusPerNode;
   const totalCpu = (isCpu ? d.nodes * 16 : totalGpu * d.cpuPerGpu) + d.headCpu;
   const totalMem = (isCpu ? d.nodes * 64 : totalGpu * d.memPerGpuGi) + d.headMemGi;
-  const estWaitMin = effectiveGpuType === "A100" ? 26 : d.nodes >= 4 ? 14 : d.queue.includes("shared") ? 12 : 3;
+  const selectedQueue = queues.find((q) => q.name === d.queue);
+  const estWaitMin = selectedQueue ? selectedQueue.avgWaitMin : 0;
+  const noQueues = queues.length === 0;
+
+  const [submitting, setSubmitting] = useState(false);
+  const [submitErr, setSubmitErr] = useState("");
 
   // validation
   const errors = useMemo(() => {
@@ -152,6 +190,7 @@ export function CreateJobPage() {
     else if (!/^[a-z0-9-]+$/.test(d.name)) e.push("Job name 只能包含小写字母、数字和连字符");
     if (!d.image) e.push("必须选择镜像");
     if (!d.entrypoint.trim()) e.push("Entrypoint 不能为空");
+    if (!d.queue) e.push("必须选择队列");
     if (!isCpu && d.gpusPerNode < 1) e.push("GPU per node 至少为 1");
     if (d.nodes > 1 && !d.checkpointShared)
       e.push("多节点训练要求 checkpoint 使用共享存储，否则各 worker 无法写入同一路径");
@@ -159,16 +198,16 @@ export function CreateJobPage() {
   }, [d, isCpu]);
 
   const stepValid = (s: number): boolean => {
-    if (s === 0) return !!d.name.trim() && /^[a-z0-9-]+$/.test(d.name);
+    if (s === 0) return !!d.name.trim() && /^[a-z0-9-]+$/.test(d.name) && !!d.queue;
     if (s === 1) return !!d.image && !!d.entrypoint.trim();
     if (s === 3) return !(d.nodes > 1 && !d.checkpointShared);
     return true;
   };
 
   const submit = async () => {
-    if (errors.length) return;
-    const now = 0.1;
-    // Try the real console submit (creates a durable platform job record).
+    if (errors.length || noQueues) return;
+    setSubmitting(true);
+    setSubmitErr("");
     try {
       const created = await createJobApi({
         name: d.name,
@@ -200,88 +239,40 @@ export function CreateJobPage() {
         },
       });
       nav(`/jobs/${created.id}`);
-      return;
-    } catch {
-      /* backend unavailable — fall back to a local demo job below */
+    } catch (e) {
+      setSubmitErr(errMsg(e));
+    } finally {
+      setSubmitting(false);
     }
-    const job: Job = {
-      id: "tmp",
-      name: d.name,
-      status: "Queued",
-      project: d.project,
-      queue: d.queue,
-      quotaGroup: d.quotaGroup,
-      priority: d.priority,
-      image: d.image,
-      entrypoint: d.entrypoint,
-      workingDir: d.workingDir,
-      gitRef: d.gitRef,
-      env: d.env,
-      creator: "asher",
-      createdAt: new Date().toISOString(),
-      durationSec: 0,
-      resources: {
-        gpuType: effectiveGpuType,
-        nodes: d.nodes,
-        gpusPerNode: d.gpusPerNode,
-        cpuPerGpu: d.cpuPerGpu,
-        memPerGpuGi: d.memPerGpuGi,
-        headCpu: d.headCpu,
-        headMemGi: d.headMemGi,
-        rdma: d.rdma,
-      },
-      mounts: {
-        dataset: { path: "/data", uri: d.datasetUri, mode: "ro" },
-        checkpoint: { path: "/checkpoints", uri: d.checkpointUri, mode: "rw", shared: d.checkpointShared },
-        scratch: { path: "/scratch", sizeGi: d.scratchGi },
-      },
-      description: d.description,
-      timeline: buildTimeline("Queued", now),
-      pods: buildPods("Queued", d.nodes, d.gpusPerNode),
-      events: buildEvents("Queued"),
-      logs: buildLogs("Queued", d.nodes),
-      metrics: buildMetrics(0),
-      artifacts: buildArtifacts("Queued"),
-      rayJobYaml: rayJobYaml({
-        name: d.name,
-        image: d.image,
-        entrypoint: d.entrypoint,
-        resources: {
-          gpuType: effectiveGpuType,
-          nodes: d.nodes,
-          gpusPerNode: d.gpusPerNode,
-          cpuPerGpu: d.cpuPerGpu,
-          memPerGpuGi: d.memPerGpuGi,
-          headCpu: d.headCpu,
-          headMemGi: d.headMemGi,
-          rdma: d.rdma,
-        },
-      }),
-    };
-    void iso;
-    const id = addJob(job);
-    nav(`/jobs/${id}`);
   };
 
   return (
     <div className="mx-auto max-w-5xl">
       <PageHeader
-        title={cloneSrc ? "Clone Job" : "Create Training Job"}
-        subtitle={cloneSrc ? `基于 ${cloneSrc.name} 复制配置` : "5 步完成训练任务提交"}
+        title={cloneSrc ? t("cj.cloneTitle") : t("cj.createTitle")}
+        subtitle={cloneSrc ? t("cj.cloneSub", { name: cloneSrc.name }) : t("cj.createSub")}
       />
+
+      {optErr && (
+        <div className="mb-3 flex items-center gap-2 rounded-md border border-failed/30 bg-failed/10 px-3 py-2 text-xs text-failed">
+          <AlertTriangle size={13} /> {optErr}
+        </div>
+      )}
+      {noQueues && !optErr && (
+        <div className="mb-3 flex items-center gap-2 rounded-md border border-queued/40 bg-queued/10 px-3 py-2 text-xs text-queued">
+          <AlertTriangle size={13} /> {t("cj.noQueue")}
+        </div>
+      )}
 
       {/* stepper */}
       <div className="mb-5 flex items-center">
-        {STEPS.map((s, i) => {
+        {STEP_KEYS.map((s, i) => {
           const Icon = s.icon;
           const done = i < step;
           const active = i === step;
           return (
             <div key={s.key} className="flex flex-1 items-center last:flex-none">
-              <button
-                onClick={() => i <= step && setStep(i)}
-                className="flex items-center gap-2"
-              >
+              <button onClick={() => i <= step && setStep(i)} className="flex items-center gap-2">
                 <span
                   className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs ${
                     active
@@ -294,10 +285,10 @@ export function CreateJobPage() {
                   {done ? <Check size={14} /> : <Icon size={14} />}
                 </span>
                 <span className={`text-[13px] ${active ? "font-medium text-ink" : "text-ink3"}`}>
-                  {s.label}
+                  {t(s.labelKey)}
                 </span>
               </button>
-              {i < STEPS.length - 1 && (
+              {i < STEP_KEYS.length - 1 && (
                 <div className={`mx-3 h-px flex-1 ${done ? "bg-succeeded/40" : "bg-border"}`} />
               )}
             </div>
@@ -308,39 +299,41 @@ export function CreateJobPage() {
       <div className="grid grid-cols-3 gap-4">
         <div className="col-span-2">
           <Panel>
-            {step === 0 && <StepBasic d={d} set={set} />}
-            {step === 1 && <StepCode d={d} set={set} />}
+            {step === 0 && (
+              <StepBasic d={d} set={set} projects={projectOptions} queues={queueChoices} />
+            )}
+            {step === 1 && <StepCode d={d} set={set} images={images} />}
             {step === 2 && <StepResources d={d} set={set} isCpu={isCpu} />}
             {step === 3 && <StepData d={d} set={set} />}
-            {step === 4 && <StepReview d={d} errors={errors} />}
+            {step === 4 && <StepReview d={d} errors={errors} submitErr={submitErr} />}
           </Panel>
         </div>
 
         {/* live estimation rail */}
         <div className="col-span-1">
-          <Panel title="资源估算" className="sticky top-0">
+          <Panel title={t("cj.estTitle")} className="sticky top-0">
             <div className="space-y-3">
-              <EstRow icon={Zap} label="总 GPU" value={isCpu ? "—" : `${totalGpu}`} sub={isCpu ? "CPU-only" : `${effectiveGpuType}`} />
-              <EstRow icon={Cpu} label="总 CPU" value={`${totalCpu}`} sub="cores" />
-              <EstRow icon={MemoryStick} label="总内存" value={`${totalMem}`} sub="GiB" />
-              <EstRow icon={Clock} label="预计排队" value={`~${estWaitMin}`} sub="min" tone={estWaitMin > 15 ? "queued" : "ink"} />
+              <EstRow icon={Zap} label={t("cj.totalGpu")} value={isCpu ? "—" : `${totalGpu}`} sub={isCpu ? "CPU-only" : `${effectiveGpuType}`} />
+              <EstRow icon={Cpu} label={t("cj.totalCpu")} value={`${totalCpu}`} sub="cores" />
+              <EstRow icon={MemoryStick} label={t("cj.totalMem")} value={`${totalMem}`} sub="GiB" />
+              <EstRow icon={Clock} label={t("cj.estWait")} value={`~${estWaitMin}`} sub="min" tone={estWaitMin > 15 ? "queued" : "ink"} />
             </div>
             <div className="mt-4 border-t border-border pt-3">
-              <div className="mb-1.5 text-xs text-ink3">队列</div>
+              <div className="mb-1.5 text-xs text-ink3">{t("cj.queue")}</div>
               <div className="flex items-center justify-between text-[13px]">
-                <span className="text-ink">{d.queue}</span>
+                <span className="text-ink">{d.queue || "—"}</span>
                 <GpuTypeBadge type={effectiveGpuType} />
               </div>
             </div>
             {d.nodes > 1 && (
               <div className="mt-3 flex items-start gap-2 rounded-md border border-brand/30 bg-brand/10 px-2.5 py-2 text-xs text-ink2">
                 <Info size={13} className="mt-0.5 flex-shrink-0 text-brand" />
-                多节点：RDMA {d.rdma ? "已启用" : "未启用"}，checkpoint {d.checkpointShared ? "共享存储 ✓" : "非共享 ✗"}
+                RDMA {d.rdma ? "✓" : "✗"} · checkpoint {d.checkpointShared ? "shared ✓" : "✗"}
               </div>
             )}
             {errors.length > 0 && step === 4 && (
               <div className="mt-3 rounded-md border border-failed/30 bg-failed/10 px-2.5 py-2 text-xs text-failed">
-                {errors.length} 个校验错误待修复
+                {t("cj.errCount", { n: errors.length })}
               </div>
             )}
           </Panel>
@@ -349,24 +342,20 @@ export function CreateJobPage() {
 
       {/* footer nav */}
       <div className="mt-5 flex items-center justify-between">
-        <button
-          className="btn"
-          disabled={step === 0}
-          onClick={() => setStep((s) => Math.max(0, s - 1))}
-        >
-          <ChevronLeft size={15} /> 上一步
+        <button className="btn" disabled={step === 0} onClick={() => setStep((s) => Math.max(0, s - 1))}>
+          <ChevronLeft size={15} /> {t("cj.prev")}
         </button>
-        {step < STEPS.length - 1 ? (
-          <button
-            className="btn btn-primary"
-            disabled={!stepValid(step)}
-            onClick={() => setStep((s) => s + 1)}
-          >
-            下一步 <ChevronRight size={15} />
+        {step < STEP_KEYS.length - 1 ? (
+          <button className="btn btn-primary" disabled={!stepValid(step)} onClick={() => setStep((s) => s + 1)}>
+            {t("cj.next")} <ChevronRight size={15} />
           </button>
         ) : (
-          <button className="btn btn-primary" disabled={errors.length > 0} onClick={submit}>
-            <Check size={15} /> Submit Job
+          <button
+            className="btn btn-primary"
+            disabled={errors.length > 0 || noQueues || submitting}
+            onClick={submit}
+          >
+            {submitting ? <Loader size={15} className="animate-spin" /> : <Check size={15} />} {t("cj.submit")}
           </button>
         )}
       </div>
@@ -409,7 +398,17 @@ function Field({ label, children, hint }: { label: string; children: React.React
   );
 }
 
-function StepBasic({ d, set }: { d: Draft; set: (p: Partial<Draft>) => void }) {
+function StepBasic({
+  d,
+  set,
+  projects,
+  queues,
+}: {
+  d: Draft;
+  set: (p: Partial<Draft>) => void;
+  projects: string[];
+  queues: Queue[];
+}) {
   return (
     <div>
       <Field label="Job name" hint="小写字母、数字、连字符，例如 sslod26-pretrain-base">
@@ -419,15 +418,27 @@ function StepBasic({ d, set }: { d: Draft; set: (p: Partial<Draft>) => void }) {
         <Field label="Project">
           <Select
             value={d.project}
-            onChange={(v) => set({ project: v, quotaGroup: v + "-qg", entrypoint: CONFIGS[v]?.[0] || d.entrypoint, workingDir: "/workspace/" + v })}
-            options={PROJECTS.map((p) => ({ value: p, label: p }))}
+            onChange={(v) => set({ project: v, quotaGroup: v + "-qg", workingDir: "/workspace/" + v })}
+            options={
+              projects.length
+                ? projects.map((p) => ({ value: p, label: p }))
+                : [{ value: "", label: "（无项目，请联系管理员）" }]
+            }
           />
         </Field>
         <Field label="QuotaGroup">
-          <Select value={d.quotaGroup} onChange={(v) => set({ quotaGroup: v })} options={[{ value: d.quotaGroup, label: d.quotaGroup }]} />
+          <input className="input" value={d.quotaGroup} onChange={(e) => set({ quotaGroup: e.target.value })} />
         </Field>
         <Field label="Queue">
-          <Select value={d.queue} onChange={(v) => set({ queue: v })} options={QUEUES.map((q) => ({ value: q, label: q }))} />
+          <Select
+            value={d.queue}
+            onChange={(v) => set({ queue: v })}
+            options={
+              queues.length
+                ? queues.map((q) => ({ value: q.name, label: `${q.name} (${q.gpuType})` }))
+                : [{ value: "", label: "（集群无可用队列）" }]
+            }
+          />
         </Field>
         <Field label="Priority">
           <Select
@@ -448,26 +459,18 @@ function StepBasic({ d, set }: { d: Draft; set: (p: Partial<Draft>) => void }) {
   );
 }
 
-function StepCode({ d, set }: { d: Draft; set: (p: Partial<Draft>) => void }) {
-  const configs = CONFIGS[d.project] || [];
+function StepCode({ d, set, images }: { d: Draft; set: (p: Partial<Draft>) => void; images: string[] }) {
   return (
     <div>
-      <Field label="Runtime Image" hint="从平台镜像库选择，无需自己 build">
-        <Select value={d.image} onChange={(v) => set({ image: v })} options={IMAGES.map((i) => ({ value: i, label: i }))} />
+      <Field label="Runtime Image" hint="从平台镜像库选择（管理员在 Admin · Runtime Images 注册）">
+        {images.length ? (
+          <Select value={d.image} onChange={(v) => set({ image: v })} options={images.map((i) => ({ value: i, label: i }))} />
+        ) : (
+          <input className="input font-mono text-xs" value={d.image} placeholder="registry/repo:tag" onChange={(e) => set({ image: e.target.value })} />
+        )}
       </Field>
-      <Field label="Entrypoint command" hint="选择 config 自动生成命令，也可手动编辑">
-        <div className="mb-2 flex flex-wrap gap-1.5">
-          {configs.map((c) => (
-            <button
-              key={c}
-              onClick={() => set({ entrypoint: "python tools/train.py --config " + c })}
-              className="chip border-borderc bg-panel2 text-ink2 hover:border-brand hover:text-ink"
-            >
-              {c.split("/").pop()}
-            </button>
-          ))}
-        </div>
-        <input className="input font-mono text-xs" value={d.entrypoint} onChange={(e) => set({ entrypoint: e.target.value })} />
+      <Field label="Entrypoint command" hint="例如 python tools/train.py --config configs/xxx.py">
+        <input className="input font-mono text-xs" value={d.entrypoint} placeholder="python tools/train.py --config ..." onChange={(e) => set({ entrypoint: e.target.value })} />
       </Field>
       <div className="grid grid-cols-2 gap-4">
         <Field label="Working directory">
@@ -501,10 +504,7 @@ function StepCode({ d, set }: { d: Draft; set: (p: Partial<Draft>) => void }) {
                   set({ env });
                 }}
               />
-              <button
-                className="btn-ghost rounded p-1.5 text-ink3"
-                onClick={() => set({ env: d.env.filter((_, j) => j !== i) })}
-              >
+              <button className="btn-ghost rounded p-1.5 text-ink3" onClick={() => set({ env: d.env.filter((_, j) => j !== i) })}>
                 ✕
               </button>
             </div>
@@ -616,7 +616,7 @@ function StepData({ d, set }: { d: Draft; set: (p: Partial<Draft>) => void }) {
         <div className="flex items-center gap-2">
           <span className="chip border-borderc bg-panel2 text-ink3">/checkpoints</span>
           <span className="chip border-succeeded/40 bg-succeeded/10 text-succeeded">read-write</span>
-          <input className="input font-mono text-xs" value={d.checkpointUri} onChange={(e) => set({ checkpointUri: e.target.value })} />
+          <input className="input font-mono text-xs" value={d.checkpointUri} onChange={(e) => set({ checkpointUri: e.target.value })} placeholder="s3://checkpoints/my-run" />
         </div>
         <label className="mt-2 flex cursor-pointer items-center gap-2 text-[13px] text-ink2">
           <input type="checkbox" checked={d.checkpointShared} onChange={(e) => set({ checkpointShared: e.target.checked })} />
@@ -626,12 +626,7 @@ function StepData({ d, set }: { d: Draft; set: (p: Partial<Draft>) => void }) {
       <Field label="Scratch" hint="默认挂载到 /scratch，用于 Ray object spilling">
         <div className="flex items-center gap-2">
           <span className="chip border-borderc bg-panel2 text-ink3">/scratch</span>
-          <input
-            type="number"
-            className="input w-28"
-            value={d.scratchGi}
-            onChange={(e) => set({ scratchGi: Number(e.target.value) })}
-          />
+          <input type="number" className="input w-28" value={d.scratchGi} onChange={(e) => set({ scratchGi: Number(e.target.value) })} />
           <span className="text-xs text-ink3">GiB</span>
         </div>
       </Field>
@@ -650,25 +645,30 @@ function StepData({ d, set }: { d: Draft; set: (p: Partial<Draft>) => void }) {
   );
 }
 
-function StepReview({ d, errors }: { d: Draft; errors: string[] }) {
+function StepReview({ d, errors, submitErr }: { d: Draft; errors: string[]; submitErr: string }) {
   const [showYaml, setShowYaml] = useState(false);
   const effectiveGpuType: GpuType = d.gpuType === "Auto" ? "H20" : d.gpuType;
   const totalGpu = effectiveGpuType === "CPU-only" ? 0 : d.nodes * d.gpusPerNode;
 
   const rows: [string, string][] = [
     ["Job name", d.name || "—"],
-    ["Project / Queue", `${d.project} · ${d.queue}`],
+    ["Project / Queue", `${d.project || "—"} · ${d.queue || "—"}`],
     ["Priority", d.priority],
-    ["Image", d.image],
-    ["Entrypoint", d.entrypoint],
+    ["Image", d.image || "—"],
+    ["Entrypoint", d.entrypoint || "—"],
     ["Resources", effectiveGpuType === "CPU-only" ? `CPU-only · ${d.nodes} node(s)` : `${effectiveGpuType} · ${d.nodes} node(s) × ${d.gpusPerNode} = ${totalGpu} GPU`],
     ["RDMA", d.rdma ? "enabled" : "disabled"],
-    ["Dataset", `${d.datasetUri} → /data (ro)`],
-    ["Checkpoint", `${d.checkpointUri} → /checkpoints (rw${d.checkpointShared ? ", shared" : ""})`],
+    ["Dataset", d.datasetUri ? `${d.datasetUri} → /data (ro)` : "—"],
+    ["Checkpoint", d.checkpointUri ? `${d.checkpointUri} → /checkpoints (rw${d.checkpointShared ? ", shared" : ""})` : "—"],
   ];
 
   return (
     <div>
+      {submitErr && (
+        <div className="mb-4 flex items-center gap-2 rounded-md border border-failed/40 bg-failed/10 px-3 py-2.5 text-[13px] text-failed">
+          <AlertTriangle size={15} /> {submitErr}
+        </div>
+      )}
       {errors.length > 0 && (
         <div className="mb-4 rounded-md border border-failed/40 bg-failed/10 p-3">
           <div className="mb-1.5 flex items-center gap-2 text-[13px] font-medium text-failed">
@@ -695,12 +695,9 @@ function StepReview({ d, errors }: { d: Draft; errors: string[] }) {
         </table>
       </div>
 
-      <button
-        className="flex items-center gap-2 text-[13px] text-brand hover:underline"
-        onClick={() => setShowYaml((v) => !v)}
-      >
+      <button className="flex items-center gap-2 text-[13px] text-brand hover:underline" onClick={() => setShowYaml((v) => !v)}>
         <ChevronRight size={14} className={showYaml ? "rotate-90 transition-transform" : "transition-transform"} />
-        {showYaml ? "隐藏" : "查看"}平台生成的 RayJob YAML（dry-run）
+        {showYaml ? "隐藏" : "查看"}平台生成的 RayJob YAML（dry-run 预览）
       </button>
       {showYaml && (
         <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-border bg-[#0b0f14] p-3 font-mono text-[11px] leading-relaxed text-ink2">

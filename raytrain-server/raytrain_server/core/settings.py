@@ -8,7 +8,6 @@ custom values by passing kwargs directly.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Annotated
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -49,9 +48,27 @@ class Settings(BaseSettings):
     # Map of gpu_type -> Ray dashboard / Job Submission API base URL.
     # Example: {"h20": "http://ray-shared-h20-head.raytrain-shared.svc:8265"}
     shared_clusters: dict[str, str] = Field(default_factory=dict)
+    # Namespace where the shared RayClusters (and thus live RayJob head/worker
+    # pods) run. Used to read a live job's real pods + events (Req 14.5).
+    shared_namespace: str = "raytrain-shared"
 
     # MLflow tracking URI (passed through to training subprocess via env vars)
     mlflow_tracking_uri: str = ""
+
+    # ---------- observability (cluster already has Loki + Prometheus) ----------
+    # Base URLs for log/metric queries. Empty → feature reports "unavailable"
+    # rather than synthesizing data.
+    loki_url: str = ""
+    prometheus_url: str = ""
+
+    # ---------- submission behavior ----------
+    # If true, a submit for a gpu_type with no shared cluster is kept as a
+    # record-only (Queued) job instead of being rejected. Default false so
+    # production behavior matches Req 5.4 (reject, don't fake). Dev/local can
+    # enable it to demo the UI without a cluster.
+    allow_record_only_submit: bool = False
+    # Background status reconcile loop interval for live jobs (seconds).
+    status_reconcile_interval_s: int = 30
 
     # ---------- legacy per-job submission (kept as fallback) ----------
     # If a job comes in with cluster_mode=per_job we fall back to creating a
@@ -69,6 +86,13 @@ class Settings(BaseSettings):
     # Wildcard base domain for IDE URLs (e.g. raytrain.example.com). Empty →
     # IDE URLs are omitted and users reach pods via port-forward / NodePort.
     workspace_base_domain: str = ""
+    # NodePort access (current access strategy; Ingress is a later evolution).
+    # Externally reachable node host/IP users connect to for NodePort IDE/SSH.
+    # Empty → fall back to the pod node's InternalIP (read via K8s API).
+    workspace_node_host: str = ""
+    # How long start_workspace waits for an old (Terminating) pod to disappear
+    # before creating the new one.
+    workspace_start_wait_s: int = 60
 
     # ---------- DevSession (M3) ----------
     devsession_namespace: str = "raytrain-dev"

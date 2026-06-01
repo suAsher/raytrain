@@ -15,25 +15,27 @@ import {
   MemoryStick,
   User,
   CloudCog,
+  Languages,
 } from "lucide-react";
-import { useState, useEffect } from "react";
-import { StoreProvider, useStore, ALL_PROJECTS } from "../lib/store";
+import { useState } from "react";
+import { StoreProvider, useStore } from "../lib/store";
 import { pct } from "../lib/format";
-import { onMockChange, usingMock } from "../lib/api";
+import { useI18n } from "../i18n";
 
 const NAV = [
-  { to: "/overview", label: "Overview", icon: LayoutDashboard },
-  { to: "/workspaces", label: "开发机", icon: CloudCog },
-  { to: "/jobs", label: "Training Jobs", icon: ListTree },
-  { to: "/jobs/new", label: "Create Job", icon: PlusCircle },
-  { to: "/queues", label: "Queues", icon: Layers },
-  { to: "/experiments", label: "Experiments", icon: FlaskConical },
-  { to: "/artifacts", label: "Artifacts", icon: Package },
-  { to: "/datasets", label: "Datasets", icon: Database },
-  { to: "/admin", label: "Admin", icon: Shield },
+  { to: "/overview", key: "nav.overview", icon: LayoutDashboard },
+  { to: "/workspaces", key: "nav.workspaces", icon: CloudCog },
+  { to: "/jobs", key: "nav.jobs", icon: ListTree },
+  { to: "/jobs/new", key: "nav.create", icon: PlusCircle },
+  { to: "/queues", key: "nav.queues", icon: Layers },
+  { to: "/experiments", key: "nav.experiments", icon: FlaskConical },
+  { to: "/artifacts", key: "nav.artifacts", icon: Package },
+  { to: "/datasets", key: "nav.datasets", icon: Database },
+  { to: "/admin", key: "nav.admin", icon: Shield },
 ];
 
 function Sidebar() {
+  const { t } = useI18n();
   return (
     <aside className="flex w-56 flex-shrink-0 flex-col border-r border-border bg-panel">
       <div className="flex h-12 items-center gap-2 border-b border-border px-4">
@@ -42,7 +44,7 @@ function Sidebar() {
         </div>
         <span className="font-semibold text-ink">raytrain</span>
         <span className="ml-auto rounded bg-panel2 px-1.5 py-0.5 text-[10px] text-ink3">
-          console
+          {t("app.console")}
         </span>
       </div>
       <nav className="flex-1 overflow-y-auto p-2">
@@ -62,17 +64,17 @@ function Sidebar() {
               }
             >
               <Icon size={16} />
-              {n.label}
+              {t(n.key)}
             </NavLink>
           );
         })}
       </nav>
       <div className="border-t border-border p-3 text-[11px] text-ink3">
         <div className="flex items-center justify-between">
-          <span>cluster</span>
+          <span>{t("app.cluster")}</span>
           <span className="flex items-center gap-1 text-succeeded">
             <span className="h-1.5 w-1.5 rounded-full bg-succeeded" />
-            healthy
+            {t("app.healthy")}
           </span>
         </div>
         <div className="mt-1">KubeRay 2.54 · Kueue 0.8</div>
@@ -95,22 +97,36 @@ function QuotaPill({
   unit?: string;
 }) {
   const p = pct(used, total);
-  const tone = p >= 90 ? "text-failed" : p >= 75 ? "text-queued" : "text-ink";
+  const tone = total === 0 ? "text-ink2" : p >= 90 ? "text-failed" : p >= 75 ? "text-queued" : "text-ink";
   return (
     <div className="flex items-center gap-2 rounded-md border border-border bg-panel px-2.5 py-1">
       <Icon size={14} className="text-ink3" />
       <span className="text-[11px] text-ink3">{label}</span>
       <span className={`text-xs font-medium tabular-nums ${tone}`}>
         {used}
-        {unit} / {total}
-        {unit}
+        {unit} / {total === 0 ? "∞" : `${total}${unit || ""}`}
       </span>
     </div>
   );
 }
 
+function LangToggle() {
+  const { lang, setLang, t } = useI18n();
+  return (
+    <button
+      onClick={() => setLang(lang === "zh" ? "en" : "zh")}
+      title={t("app.lang")}
+      className="flex items-center gap-1.5 rounded-md border border-border bg-panel px-2 py-1 text-[13px] text-ink2 hover:bg-panel2"
+    >
+      <Languages size={14} className="text-ink3" />
+      {lang === "zh" ? "中文" : "EN"}
+    </button>
+  );
+}
+
 function TopBar() {
-  const { project, setProject, me, logout, quota } = useStore();
+  const { project, setProject, projects, me, logout, quota } = useStore();
+  const { t } = useI18n();
   const [openProj, setOpenProj] = useState(false);
   const [openUser, setOpenUser] = useState(false);
   const nav = useNavigate();
@@ -134,7 +150,7 @@ function TopBar() {
             <>
               <div className="fixed inset-0 z-10" onClick={() => setOpenProj(false)} />
               <div className="absolute left-0 top-9 z-20 w-48 rounded-md border border-borderc bg-panel2 py-1 shadow-xl">
-                {ALL_PROJECTS.map((p) => (
+                {projects.map((p) => (
                   <button
                     key={p}
                     onClick={() => {
@@ -154,8 +170,6 @@ function TopBar() {
         </div>
       </div>
 
-      <span className="chip border-borderc bg-panel2 text-ink2">QuotaGroup: research-default</span>
-
       {/* quota summary */}
       <div className="ml-auto flex items-center gap-2">
         <QuotaPill icon={Zap} label="GPU" used={quota.gpu.used} total={quota.gpu.total} />
@@ -167,13 +181,15 @@ function TopBar() {
       <div className="relative w-56">
         <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink3" />
         <input
-          placeholder="Search jobs, queues…"
+          placeholder={t("app.search")}
           onKeyDown={(e) => {
             if (e.key === "Enter") nav("/jobs");
           }}
           className="input pl-8"
         />
       </div>
+
+      <LangToggle />
 
       <div className="relative">
         <button
@@ -200,25 +216,13 @@ function TopBar() {
                 onClick={logout}
                 className="block w-full px-3 py-1.5 text-left text-[13px] text-ink2 hover:bg-panel"
               >
-                退出登录
+                {t("app.logout")}
               </button>
             </div>
           </>
         )}
       </div>
     </header>
-  );
-}
-
-function DemoBanner() {
-  const [mock, setMock] = useState(usingMock());
-  useEffect(() => onMockChange(setMock), []);
-  if (!mock) return null;
-  return (
-    <div className="flex items-center justify-center gap-2 bg-amber-500/10 px-4 py-1.5 text-center text-xs text-amber-400">
-      <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-      演示数据：后端暂不可达，当前页面显示本地示例数据（请检查登录态或后端连接）
-    </div>
   );
 }
 
@@ -229,7 +233,6 @@ export function AppShell() {
         <Sidebar />
         <div className="flex flex-1 flex-col overflow-hidden">
           <TopBar />
-          <DemoBanner />
           <main className="flex-1 overflow-y-auto p-6">
             <Outlet />
           </main>

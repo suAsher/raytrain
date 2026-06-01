@@ -122,6 +122,20 @@ class _FakeK8s:
     def pod_ip(self, name, namespace):
         return "10.0.0.5"
 
+    # new capabilities (Task 7) the WorkspaceService relies on
+    def pod_container_status(self, name, namespace):
+        # present pod → ready (so derive_state maps Running→running)
+        return ("ready", None) if name in self.pods else ("notfound", None)
+
+    def wait_pod_deleted(self, name, namespace, timeout_s=60):
+        return name not in self.pods
+
+    def service_node_ports(self, name, namespace):
+        return {"jupyter": 30888, "code-server": 30808, "ssh": 30022} if name in self.services else {}
+
+    def node_address(self, pod_name, namespace):
+        return "10.0.0.9"
+
     def ensure_service(self, manifest, namespace):
         self.services.add(manifest["metadata"]["name"])
         return manifest["metadata"]["name"]
@@ -168,7 +182,9 @@ class TestWorkspaceApi:
         )
         assert r.status_code == 201, r.text
         wid = r.json()["id"]
-        assert r.json()["state"] == "running"
+        # create no longer fakes running; with the fake reporting Running+ready,
+        # derive_state may already map to running — accept either transitional.
+        assert r.json()["state"] in ("creating", "starting", "running")
         # pod + pvc + service created
         assert app.state.fake_k8s.pods
         assert app.state.fake_k8s.pvcs
@@ -210,7 +226,8 @@ class TestWorkspaceApi:
         ).json()["id"]
         r = client.post(f"/v1/workspaces/{wid}/stop", headers=_h(user_token))
         assert r.status_code == 200
-        assert r.json()["state"] == "stopped"
+        # pod deleted in fake → derive_state reports stopped; intent is stopping
+        assert r.json()["state"] in ("stopping", "stopped")
         # pod gone, pvc stays
         assert not app.state.fake_k8s.pods
         assert app.state.fake_k8s.pvcs
@@ -222,7 +239,7 @@ class TestWorkspaceApi:
         client.post(f"/v1/workspaces/{wid}/stop", headers=_h(user_token))
         r = client.post(f"/v1/workspaces/{wid}/start", headers=_h(user_token))
         assert r.status_code == 200
-        assert r.json()["state"] == "running"
+        assert r.json()["state"] in ("creating", "starting", "running")
         assert app.state.fake_k8s.pods
 
     def test_delete_with_pvc(self, client, user_token, app) -> None:

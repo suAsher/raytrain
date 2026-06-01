@@ -7,9 +7,11 @@ import { useStore } from "../lib/store";
 import { fetchOverview } from "../lib/consoleApi";
 import type { Job, ResourcePool } from "../lib/types";
 import { fmtRelative, fmtDuration, pct } from "../lib/format";
+import { useI18n } from "../i18n";
 
 export function OverviewPage() {
   const { quota } = useStore();
+  const { t } = useI18n();
   const nav = useNavigate();
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [pools, setPools] = useState<ResourcePool[]>([]);
@@ -35,44 +37,44 @@ export function OverviewPage() {
   return (
     <div>
       <PageHeader
-        title="Overview"
-        subtitle="平台与当前项目的训练运行状况"
+        title={t("ov.title")}
+        subtitle={t("ov.subtitle")}
         actions={
           <button className="btn btn-primary" onClick={() => nav("/jobs/new")}>
-            <span>Create Job</span>
+            <span>{t("jobs.create")}</span>
           </button>
         }
       />
 
       <div className="grid grid-cols-4 gap-3">
-        <Stat label="Running" value={count("Running")} tone="running" sub="正在运行" />
-        <Stat label="Queued" value={count("Queued")} tone="queued" sub="排队等待准入" />
-        <Stat label="Failed (24h)" value={failed.length} tone="failed" sub="近 24 小时失败" />
-        <Stat label="Succeeded (24h)" value={count("Succeeded")} tone="succeeded" sub="近 24 小时完成" />
+        <Stat label={t("ov.running")} value={count("Running")} tone="running" sub={t("ov.runningSub")} />
+        <Stat label={t("ov.queued")} value={count("Queued")} tone="queued" sub={t("ov.queuedSub")} />
+        <Stat label={t("ov.failed24")} value={failed.length} tone="failed" sub={t("ov.failedSub")} />
+        <Stat label={t("ov.succeeded24")} value={count("Succeeded")} tone="succeeded" sub={t("ov.succeededSub")} />
       </div>
 
       <div className="mt-3 grid grid-cols-3 gap-3">
-        <Panel title="当前项目配额" className="col-span-1">
+        <Panel title={t("ov.quota")} className="col-span-1">
           <div className="space-y-3">
             <QuotaUsageBar label="GPU" used={quota.gpu.used} total={quota.gpu.total} />
             <QuotaUsageBar label="CPU" used={quota.cpu.used} total={quota.cpu.total} />
             <QuotaUsageBar label="Memory" used={quota.memGi.used} total={quota.memGi.total} unit="Gi" />
           </div>
           <div className="mt-4 flex items-center justify-between border-t border-border pt-3 text-xs">
-            <span className="text-ink3">队列等待任务</span>
+            <span className="text-ink3">{t("ov.queueWaiting")}</span>
             <span className="font-medium text-queued">{count("Queued")} jobs</span>
           </div>
         </Panel>
 
-        <Panel title="资源池" className="col-span-2" bodyClass="p-0">
+        <Panel title={t("ov.pools")} className="col-span-2" bodyClass="p-0">
           <table className="w-full text-[13px]">
             <thead>
               <tr className="border-b border-border text-left text-xs text-ink3">
-                <th className="px-4 py-2 font-medium">Pool</th>
-                <th className="px-4 py-2 font-medium">Nodes</th>
-                <th className="px-4 py-2 font-medium">GPU Used</th>
-                <th className="px-4 py-2 font-medium">Utilization</th>
-                <th className="px-4 py-2 font-medium">Health</th>
+                <th className="px-4 py-2 font-medium">{t("ov.poolCol")}</th>
+                <th className="px-4 py-2 font-medium">{t("ov.nodes")}</th>
+                <th className="px-4 py-2 font-medium">{t("ov.gpuUsed")}</th>
+                <th className="px-4 py-2 font-medium">{t("ov.util")}</th>
+                <th className="px-4 py-2 font-medium">{t("ov.health")}</th>
               </tr>
             </thead>
             <tbody>
@@ -124,7 +126,7 @@ export function OverviewPage() {
 
       <div className="mt-3 grid grid-cols-2 gap-3">
         <Panel
-          title="最近失败任务"
+          title={t("ov.recentFailed")}
           right={
             <span className="flex items-center gap-1 text-xs text-failed">
               <AlertTriangle size={12} />
@@ -134,7 +136,7 @@ export function OverviewPage() {
           bodyClass="p-0"
         >
           {failed.length === 0 ? (
-            <div className="p-6 text-center text-[13px] text-ink3">没有失败任务 🎉</div>
+            <div className="p-6 text-center text-[13px] text-ink3">{t("ov.noFailed")}</div>
           ) : (
             <ul>
               {failed.map((j) => (
@@ -161,10 +163,10 @@ export function OverviewPage() {
         </Panel>
 
         <Panel
-          title="最近运行任务"
+          title={t("ov.recentRunning")}
           right={
             <button className="flex items-center gap-1 text-xs text-brand hover:underline" onClick={() => nav("/jobs")}>
-              查看全部 <ArrowRight size={12} />
+              {t("ov.viewAll")} <ArrowRight size={12} />
             </button>
           }
           bodyClass="p-0"

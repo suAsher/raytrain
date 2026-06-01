@@ -7,50 +7,66 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import type { Job, JobStatus } from "./types";
-import { JOBS, PROJECTS, QUOTA } from "./mockData";
-import { buildTimeline } from "./mockGen";
+import type { Job, JobStatus, QuotaSummary } from "./types";
 import { whoami, getToken, clearToken, type WhoAmI } from "./api";
-import { fetchJobs, cancelJobApi, retryJobApi } from "./consoleApi";
+import {
+  fetchJobs,
+  cancelJobApi,
+  retryJobApi,
+  fetchMyQuota,
+  fetchProjects,
+} from "./consoleApi";
 
 interface StoreValue {
   jobs: Job[];
   loading: boolean;
+  error: string;
   refresh: () => void;
   project: string;
   setProject: (p: string) => void;
+  projects: string[]; // includes the "All projects" sentinel at index 0
   me: WhoAmI | null;
   logout: () => void;
   getJob: (id: string) => Job | undefined;
-  cancelJob: (id: string) => void;
+  cancelJob: (id: string) => Promise<void>;
   retryJob: (id: string) => Promise<string>; // returns new job id
-  cloneJob: (id: string) => Job; // returns prefilled draft (not persisted)
-  addJob: (j: Job) => string;
-  quota: typeof QUOTA;
+  quota: QuotaSummary;
 }
 
-const Ctx = createContext<StoreValue | null>(null);
+const ALL = "All projects";
+const EMPTY_QUOTA: QuotaSummary = {
+  gpu: { used: 0, total: 0 },
+  cpu: { used: 0, total: 0 },
+  memGi: { used: 0, total: 0 },
+};
 
-let seq = JOBS.length;
+const Ctx = createContext<StoreValue | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
-  const [project, setProject] = useState<string>("All projects");
+  const [error, setError] = useState("");
+  const [project, setProject] = useState<string>(ALL);
+  const [projectList, setProjectList] = useState<string[]>([]);
   const [me, setMe] = useState<WhoAmI | null>(null);
+  const [quota, setQuota] = useState<QuotaSummary>(EMPTY_QUOTA);
 
-  // Resolve the caller's identity from the real backend. If it fails we keep a
-  // sensible placeholder so the (demo-data) UI still renders.
+  // Resolve the caller's identity + quota + project list from the backend.
   useEffect(() => {
     if (!getToken()) return;
     let alive = true;
-    whoami()
-      .then((w) => alive && setMe(w))
-      .catch(
-        () =>
-          alive &&
-          setMe({ user: "demo", tenant: "research", role: "admin", issued_at: 0, expires_at: 0 })
-      );
+    whoami().then((w) => alive && setMe(w)).catch(() => {});
+    fetchMyQuota()
+      .then((q) => {
+        if (!alive) return;
+        setQuota({
+          gpu: { used: q.usage.gpus, total: q.quota.max_gpus },
+          cpu: { used: q.usage.cpus, total: q.quota.max_cpus },
+          memGi: { used: q.usage.memory_gi, total: q.quota.max_memory_gi },
+        });
+      })
+      .catch(() => {});
+    fetchProjects().then((ps) => alive && setProjectList(ps)).catch(() => {});
     return () => {
       alive = false;
     };
@@ -59,8 +75,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(() => {
     let alive = true;
     setLoading(true);
+    setError("");
     fetchJobs()
       .then((js) => alive && setJobs(js))
+      .catch((e) => alive && setError(e instanceof Error ? e.message : String(e)))
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
@@ -76,66 +94,29 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return {
       jobs,
       loading,
+      error,
       refresh,
       project,
       setProject,
+      projects: [ALL, ...projectList],
       me,
-      quota: QUOTA,
+      quota,
       logout: () => {
         clearToken();
         location.href = "/login";
       },
       getJob: (id) => jobs.find((j) => j.id === id),
-      cancelJob: (id) => {
-        // optimistic local update + fire real API (ignore failure → demo mode)
-        setJobs((prev) =>
-          prev.map((j) =>
-            j.id === id && (j.status === "Running" || j.status === "Queued" || j.status === "Starting")
-              ? { ...j, status: "Cancelled" as JobStatus }
-              : j
-          )
-        );
-        cancelJobApi(id).catch(() => {});
+      cancelJob: async (id) => {
+        await cancelJobApi(id);
+        refresh();
       },
       retryJob: async (id) => {
-        const src = jobs.find((j) => j.id === id);
-        try {
-          const created = await retryJobApi(id);
-          setJobs((prev) => [created, ...prev]);
-          return created.id;
-        } catch {
-          // backend unavailable → local demo clone
-          if (!src) return id;
-          seq += 1;
-          const newId = `job-${String(seq).padStart(4, "0")}`;
-          const clone: Job = {
-            ...src,
-            id: newId,
-            name: src.name.replace(/-retry\d*$/, "") + "-retry",
-            status: "Queued",
-            createdAt: new Date().toISOString(),
-            startedAt: undefined,
-            durationSec: 0,
-            failure: undefined,
-            timeline: buildTimeline("Queued", 1),
-          };
-          setJobs((prev) => [clone, ...prev]);
-          return newId;
-        }
-      },
-      cloneJob: (id) => {
-        const src = jobs.find((j) => j.id === id);
-        return src as Job;
-      },
-      addJob: (j) => {
-        seq += 1;
-        const newId = `job-${String(seq).padStart(4, "0")}`;
-        const withId = { ...j, id: newId };
-        setJobs((prev) => [withId, ...prev]);
-        return newId;
+        const created = await retryJobApi(id);
+        setJobs((prev) => [created, ...prev]);
+        return created.id;
       },
     };
-  }, [jobs, loading, refresh, project, me]);
+  }, [jobs, loading, error, refresh, project, projectList, me, quota]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
@@ -146,4 +127,4 @@ export function useStore(): StoreValue {
   return v;
 }
 
-export const ALL_PROJECTS = ["All projects", ...PROJECTS];
+export type { JobStatus };

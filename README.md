@@ -786,12 +786,13 @@ raytrain/
 │   └── platform_client.py     # 调 raytrain-server 的客户端
 ├── raytrain-server/           # 平台后端（FastAPI 控制面）
 │   ├── raytrain_server/
-│   │   ├── api/               # auth / workspaces / devsessions / jobs / datasets / admin_users
-│   │   ├── core/              # jwt_auth / quota / users / sql_store / k8s / ray / minio
+│   │   ├── api/               # auth / console / workspaces / devsessions / jobs / datasets / admin_*
+│   │   ├── core/              # jwt_auth / quota / users / sql_store / k8s_client / kueue_reader /
+│   │   │                      #   loki_client / prometheus_client / artifact_store / submission_service
 │   │   └── training/          # 提交编排
 │   └── deploy/                # 生产部署清单（kustomization：ns/sa/secret/pg/cm/svc/deploy/raycluster）
-├── raytrain-console/          # 平台前端（React + TypeScript + Tailwind 工作台）
-│   ├── src/                   # pages / components / lib (api + mock)
+├── raytrain-console/          # 平台前端（React + TypeScript + Tailwind 工作台，真实数据 + 中/EN i18n）
+│   ├── src/                   # pages / components / lib (真实 API 客户端) / i18n
 │   └── deploy/                # 前端部署清单（web.yaml）
 ├── deploy/                    # 集群基础设施脚本 + 共享集群清单
 │   ├── local-singlenode/      # 单节点快速验证包

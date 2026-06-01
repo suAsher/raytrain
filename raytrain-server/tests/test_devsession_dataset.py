@@ -89,6 +89,18 @@ class _FakeK8s:
     def pod_ip(self, name, namespace):
         return "10.0.0.9"
 
+    def pod_container_status(self, name, namespace):
+        return ("ready", None) if name in self.pods else ("notfound", None)
+
+    def wait_pod_deleted(self, name, namespace, timeout_s=60):
+        return name not in self.pods
+
+    def service_node_ports(self, name, namespace):
+        return {"jupyter": 30888, "ssh": 30022} if name in self.services else {}
+
+    def node_address(self, pod_name, namespace):
+        return "10.0.0.9"
+
     def ensure_service(self, manifest, namespace):
         self.services.add(manifest["metadata"]["name"]); return manifest["metadata"]["name"]
 

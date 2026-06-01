@@ -89,8 +89,9 @@ MinIO 流式读，支持列裁剪 / filter / 多 epoch Plasma 缓存 / DDP 分�
 
 Console → **开发机**：
 
-1. 新建开发机 = 常驻 CPU Pod + RWX 持久卷，内置 Jupyter / VS Code / SSH（点卡片上的 IDE 链接
-   直接进，SSH 用 `ssh://ws-<id>...:22`）。
+1. 新建开发机 = 常驻 CPU Pod + RWX 持久卷，内置 Jupyter / VS Code / SSH。状态从
+   `creating`→`running`（由后端从 K8s 真实派生，不再「秒 running」）；**`running` 后**卡片上
+   才出现 IDE 链接（NodePort，`http://<node>:<nodePort>/`）与 SSH（`ssh://<node>:<nodePort>`）。
 2. 需要 GPU 联调 → 卡片上「挂 GPU」开一个 **DevSession**：挂同一个持久卷（代码共享），1–8 卡，
    空闲超时自动回收（后端 reclaim 循环），不浪费 GPU。
 3. 在开发机里调通后，直接 `raytrain submit`（A 路）或回浏览器 Create Job（B 路）提交训练。
@@ -101,23 +102,50 @@ Console → **开发机**：
 
 ---
 
-## 5. 端到端验收清单（有集群时）
+## 5. 端到端 0→1 验收清单（有集群时）
 
-- [ ] `RAYTRAIN_SHARED_CLUSTERS` 配了 h20，且 head `:8265/api/version` 可达
-- [ ] Console 新建开发机 → 进 Jupyter/VS Code 能编辑代码
-- [ ] 开发机终端 `raytrain submit --config ... --gpus 8 --nodes 1 --name smoke`（A 路）
-      或浏览器 Create Job 传 `code_uri`（B 路）
-- [ ] Job Detail 顶部出现 **● LIVE on cluster**，submissionId 非空
-- [ ] 「实时日志」能看到 Ray worker 的真实训练日志（loss 在降）
-- [ ] 选了 Lance 数据集时，日志里有 `ray.data.read_lance` 的读取/分片信息
-- [ ] `kubectl -n raytrain-shared get pods` 能看到该 RayJob 拉起的 worker
-- [ ] Cancel 后 Ray job 进入 STOPPED，Console 状态变 Cancelled
+按顺序逐条勾，全绿即视为「从 0 到 1 真实跑通」：
+
+- [ ] **持久化**：`RAYTRAIN_DATABASE_URL` 指向 Postgres、`RAYTRAIN_SEED_DEMO=false`；
+      重启后端后 job/资源/队列别名仍在（不丢）。
+- [ ] **集群可达**：`RAYTRAIN_SHARED_CLUSTERS` 配了 h20，head `:8265/api/version` 可达。
+- [ ] **队列真实**：Console → Queues 显示的就是集群 `kubectl get localqueue` 的队列；
+      读不到时页面显式报错（不回退假数据）。
+- [ ] **登录**：用引导管理员账号密码登录；顶栏 GPU/CPU/MEM 配额来自 `/v1/quota`。
+- [ ] **开发机**：新建开发机 → 状态从 `creating`→`running`（不再「秒 running」）；
+      `running` 后 IDE/SSH 链接可点（NodePort），进 Jupyter/VS Code 能编辑代码。
+- [ ] **停后再启**：停止开发机 → 状态 `stopping`→`stopped`；再启动能成功（Terminating
+      未清干净时返回友好 409 提示，等待后可重试）。
+- [ ] **提交训练**：开发机终端 `raytrain submit ...`（A 路）或浏览器 Create Job 传
+      `code_uri`（B 路）；队列候选来自真实 Kueue，无队列时阻止提交。
+- [ ] **LIVE**：Job Detail 顶部出现 **● 集群运行中**，submissionId 非空。
+- [ ] **真实 Pods/Events**：Job Detail → Pods 显示真实 head/worker；Events 显示翻译后的
+      K8s 事件；非 live 任务显式标注「未真实提交」。
+- [ ] **日志接 Loki**：Logs 页显示 `source: 来自 Loki` 的真实训练日志（loss 在降），
+      **任务结束后仍可查**；未配 Loki 时显示「不可用」而非伪造。
+- [ ] **指标接 Prometheus**：Metrics 页显示 `source: 来自 Prometheus` 的 GPU 利用率/显存/
+      吞吐；无数据/未配置显示「不可用」。
+- [ ] **Artifacts 真实**：训练写出 checkpoint 后，Artifacts 页/Job Detail 从 MinIO 列出
+      真实文件（按名分类 checkpoint/model/log/eval）；非 s3:// 路径显示「不可用」。
+- [ ] **Lance**：选了 Lance 数据集时，日志里有 `ray.data.read_lance` 的读取/分片信息。
+- [ ] `kubectl -n raytrain-shared get pods` 能看到该 RayJob 拉起的 worker。
+- [ ] **取消**：Cancel 后 Ray job 进入 STOPPED，Console 状态变 Cancelled。
+- [ ] **i18n**：顶栏切到 EN，全站英文；刷新后保持（localStorage）。
 
 ## 6. 没有集群时（本机 / 单节点）
 
-不配 `RAYTRAIN_SHARED_CLUSTERS`（或该 gpu_type 不在表里）时：提交仍成功，但作为**平台记录**
-（状态 Queued，无 LIVE 标记），用于演示 UI 全流程。这就是 `deploy/local-singlenode` 的默认
-行为——验证平台本身，不跑真实 GPU 训练。
+默认行为已收紧为「**不伪造**」：提交一个 gpu_type 没有配置集群的任务会被后端
+**拒绝**（`NO_CLUSTER` 友好错误），而不是生成一条永远 Queued 的假记录。
+
+如果你确实想在**无集群**环境演示 UI 全流程，显式打开 record-only 开关：
+
+```yaml
+RAYTRAIN_ALLOW_RECORD_ONLY_SUBMIT: "true"   # 仅演示用；生产保持 false
+```
+
+此时提交会落库为平台记录（状态 Queued，无 LIVE 标记），Pods/Events/Logs/Metrics 均显式
+标注「不可用」（不合成）。这就是 `deploy/local-singlenode` 的演示模式——验证平台本身，
+不跑真实 GPU 训练。
 
 ## 7. 排障
 

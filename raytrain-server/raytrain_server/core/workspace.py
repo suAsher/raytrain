@@ -172,8 +172,9 @@ def build_pod_manifest(spec: WorkspaceSpec) -> dict[str, Any]:
 
 
 def build_service_manifest(spec: WorkspaceSpec) -> dict[str, Any]:
-    """ClusterIP Service exposing the 4 IDE ports. Ingress (subdomain routing)
-    is layered on top by the deploy templates; here we keep it simple."""
+    """NodePort Service exposing the 4 IDE ports so users can reach the pod
+    without Ingress (current access strategy). nodePorts are auto-assigned by
+    K8s and read back by the API to build URLs."""
     return {
         "apiVersion": "v1",
         "kind": "Service",
@@ -183,7 +184,7 @@ def build_service_manifest(spec: WorkspaceSpec) -> dict[str, Any]:
             "labels": spec.labels,
         },
         "spec": {
-            "type": "ClusterIP",
+            "type": "NodePort",
             "selector": {"raytrain.io/workspace-id": spec.workspace_id},
             "ports": [
                 {"name": "jupyter", "port": PORT_JUPYTER, "targetPort": PORT_JUPYTER},
@@ -193,6 +194,29 @@ def build_service_manifest(spec: WorkspaceSpec) -> dict[str, Any]:
             ],
         },
     }
+
+
+def build_ide_urls_nodeport(
+    node_host: str, node_ports: dict[str, int]
+) -> dict[str, str]:
+    """Build user-facing IDE URLs from a node host + the Service's nodePorts.
+
+    Only ports actually assigned get a URL. SSH uses ssh:// scheme. Returns {}
+    when node_host is empty or no nodePorts are known (caller then reports
+    DOMAIN_NOT_CONFIGURED / not-ready).
+    """
+    if not node_host or not node_ports:
+        return {}
+    urls: dict[str, str] = {}
+    if "jupyter" in node_ports:
+        urls["jupyter"] = f"http://{node_host}:{node_ports['jupyter']}/"
+    if "code-server" in node_ports:
+        urls["code"] = f"http://{node_host}:{node_ports['code-server']}/"
+    if "pycharm" in node_ports:
+        urls["pycharm"] = f"http://{node_host}:{node_ports['pycharm']}/"
+    if "ssh" in node_ports:
+        urls["ssh"] = f"ssh://{node_host}:{node_ports['ssh']}"
+    return urls
 
 
 def build_ide_urls(spec: WorkspaceSpec, base_domain: str) -> dict[str, str]:

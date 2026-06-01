@@ -166,6 +166,42 @@ class Database:
                 created_at REAL, updated_at REAL
             )
             """,
+            # Platform-side training job records (console view). JSON columns:
+            # env / resources / mounts / failure.
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                name TEXT, "user" TEXT, tenant TEXT, project TEXT,
+                queue TEXT, quota_group TEXT, priority TEXT, status TEXT,
+                image TEXT, entrypoint TEXT, working_dir TEXT, git_ref TEXT,
+                env TEXT, submission_id TEXT, code_uri TEXT,
+                resources TEXT, mounts TEXT, failure TEXT, description TEXT,
+                experiment TEXT,
+                created_at REAL, started_at REAL, finished_at REAL
+            )
+            """,
+            # Admin-managed catalog resources (project / quota_group /
+            # runtime_image). spec is JSON text.
+            """
+            CREATE TABLE IF NOT EXISTS resources (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                spec TEXT,
+                enabled INTEGER DEFAULT 1,
+                created_at REAL, updated_at REAL
+            )
+            """,
+            # Platform-owned queue display metadata ONLY (alias/sort). Usage
+            # numbers come live from Kueue and are NOT persisted here.
+            """
+            CREATE TABLE IF NOT EXISTS queue_meta (
+                name TEXT PRIMARY KEY,
+                display_alias TEXT,
+                sort_order INTEGER DEFAULT 0,
+                created_at REAL
+            )
+            """,
         ]
         # Postgres uses SERIAL, not SQLite's INTEGER PRIMARY KEY AUTOINCREMENT.
         # Apply the swap to whichever statement(s) contain it (currently

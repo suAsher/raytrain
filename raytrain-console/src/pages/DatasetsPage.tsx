@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Database, Lock, Globe, Users } from "lucide-react";
+import { Database, Lock, Globe, Users, Loader } from "lucide-react";
 import { PageHeader, Panel } from "../components/primitives";
-import { apiFetch } from "../lib/api";
+import { apiFetch, errMsg } from "../lib/api";
 
 interface DS {
   name: string;
@@ -13,13 +13,6 @@ interface DS {
   mountPath: string;
   tags: string[];
 }
-
-const MOCK_DATASETS: DS[] = [
-  { name: "scannet", type: "lance", uri: "minio://datasets/scannet", visibility: "tenant", rows: "1,513", size: "312 GB", mountPath: "/data/scannet", tags: ["3d", "indoor", "semseg"] },
-  { name: "nuscenes", type: "lance", uri: "minio://datasets/nuscenes", visibility: "public", rows: "40,157", size: "1.1 TB", mountPath: "/data/nuscenes", tags: ["lidar", "detection"] },
-  { name: "s3dis", type: "lance", uri: "minio://datasets/s3dis", visibility: "tenant", rows: "272", size: "88 GB", mountPath: "/data/s3dis", tags: ["3d", "indoor"] },
-  { name: "occ3d-waymo", type: "lance", uri: "minio://datasets/occ3d-waymo", visibility: "private", rows: "12,840", size: "640 GB", mountPath: "/data/occ3d", tags: ["occupancy", "lidar"] },
-];
 
 // Backend /v1/datasets response (raytrain_server/api/datasets.py).
 interface ApiDataset {
@@ -51,7 +44,9 @@ const VIS = {
 };
 
 export function DatasetsPage() {
-  const [datasets, setDatasets] = useState<DS[]>(MOCK_DATASETS);
+  const [datasets, setDatasets] = useState<DS[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -71,9 +66,8 @@ export function DatasetsPage() {
           }))
         );
       })
-      .catch(() => {
-        /* keep mock fallback */
-      });
+      .catch((e) => alive && setErr(errMsg(e)))
+      .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
@@ -84,8 +78,18 @@ export function DatasetsPage() {
       <PageHeader
         title="Datasets"
         subtitle="数据挂载注册表。提交训练时选中即注入到 /data（只读）"
-        actions={<button className="btn btn-primary">Register Dataset</button>}
       />
+      {err && (
+        <div className="mb-3 rounded-md border border-failed/30 bg-failed/10 px-3 py-2 text-xs text-failed">{err}</div>
+      )}
+      {loading && (
+        <div className="py-12 text-center text-ink3"><Loader size={18} className="mx-auto animate-spin" /></div>
+      )}
+      {!loading && !err && datasets.length === 0 && (
+        <Panel bodyClass="py-12 text-center text-ink3">
+          还没有注册数据集。数据集由平台管理员注册（Lance/对象存储），注册后会出现在这里并可在创建训练时选择。
+        </Panel>
+      )}
       <div className="grid grid-cols-2 gap-3">
         {datasets.map((d) => {
           const V = VIS[d.visibility];

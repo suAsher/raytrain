@@ -1,10 +1,9 @@
 // Thin API layer for the console.
 //
-// The console is designed ahead of the backend: some pages have real endpoints
-// on raytrain-server, others (Queues/Experiments/Artifacts/Job-detail
-// pods·events·metrics) do not yet. Every data call therefore tries the real
-// API first and falls back to mock data on failure, flipping a global
-// `usingMock` flag that the UI surfaces as a "demo data" banner.
+// Real data only: every call hits raytrain-server's /v1/* endpoints. Failures
+// surface as ApiError (carrying the backend FriendlyError code/message/hint);
+// empty results render as empty states. There is no mock fallback — the UI must
+// never present synthesized data as if it were real (Req 14.5/14.6).
 
 const TOKEN_KEY = "raytrain.console.token";
 
@@ -18,36 +17,36 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
 }
 
-// Global mock indicator (read by the shell to show a banner).
-let _usingMock = false;
-const listeners = new Set<(v: boolean) => void>();
-export function usingMock(): boolean {
-  return _usingMock;
-}
-export function onMockChange(fn: (v: boolean) => void): () => void {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
-}
-function setUsingMock(v: boolean) {
-  if (_usingMock !== v) {
-    _usingMock = v;
-    listeners.forEach((fn) => fn(v));
-  }
-}
-
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  code: string;
+  hint: string;
+  constructor(status: number, message: string, code = "", hint = "") {
     super(message);
     this.status = status;
+    this.code = code;
+    this.hint = hint;
   }
 }
 
-// Surface an API error's detail message consistently.
+// Surface an API error consistently. Prefer the structured FriendlyError
+// message (+ hint); fall back to a generic message.
 export function errMsg(e: unknown): string {
-  if (e instanceof ApiError) return e.message;
+  if (e instanceof ApiError) {
+    return e.hint ? `${e.message}（${e.hint}）` : e.message;
+  }
   if (e instanceof Error) return e.message;
   return "unexpected error";
+}
+
+// Extract the FriendlyError parts for locale-aware rendering (see
+// i18n/localizeError). Non-ApiError values degrade to a bare message.
+export function errInfo(e: unknown): { code?: string; message: string; hint?: string } {
+  if (e instanceof ApiError) {
+    return { code: e.code || undefined, message: e.message, hint: e.hint || undefined };
+  }
+  if (e instanceof Error) return { message: e.message };
+  return { message: "unexpected error" };
 }
 
 export async function apiFetch<T>(
@@ -66,17 +65,27 @@ export async function apiFetch<T>(
   if (res.status === 401) {
     clearToken();
     if (location.pathname !== "/login") location.href = "/login";
-    throw new ApiError(401, "unauthorized");
+    throw new ApiError(401, "unauthorized", "UNAUTHORIZED");
   }
   if (!res.ok) {
-    let detail = res.statusText;
+    let message = res.statusText;
+    let code = "";
+    let hint = "";
     try {
       const body = await res.json();
-      detail = body.detail || detail;
+      if (body && body.error) {
+        // FriendlyError contract: { error: { code, message, hint } }
+        message = body.error.message || message;
+        code = body.error.code || "";
+        hint = body.error.hint || "";
+      } else if (body && body.detail) {
+        // legacy FastAPI HTTPException: { detail }
+        message = typeof body.detail === "string" ? body.detail : message;
+      }
     } catch {
       /* ignore */
     }
-    throw new ApiError(res.status, detail);
+    throw new ApiError(res.status, message, code, hint);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -110,19 +119,4 @@ export async function login(username: string, password: string): Promise<LoginRe
   });
   setToken(res.token);
   return res;
-}
-
-// Try a real API call; on any failure, return the mock value and flag demo mode.
-export async function withFallback<T>(
-  real: () => Promise<T>,
-  mock: () => T
-): Promise<T> {
-  try {
-    const v = await real();
-    setUsingMock(false);
-    return v;
-  } catch {
-    setUsingMock(true);
-    return mock();
-  }
 }

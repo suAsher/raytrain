@@ -189,6 +189,37 @@ class TestRequireUser:
             require_user(authorization=None)
         assert exc.value.status_code == 401
 
+    def test_disabled_user_rejected_with_valid_token(self, settings: Settings) -> None:
+        # Bug fix #4: a still-valid JWT for a now-disabled user must be rejected
+        # at require_user (live enabled-state re-check), not just at login.
+        from raytrain_server.core import users as users_mod
+        from raytrain_server.core.users import UserRecord
+
+        store = users_mod.UserStore()
+        store.create(UserRecord(user="dave", tenant="t", role="user", enabled=False))
+        users_mod.set_user_store(store)
+        try:
+            token, _ = issue_token("dave", settings=settings)
+            with pytest.raises(HTTPException) as exc:
+                require_user(authorization=f"Bearer {token}")
+            assert exc.value.status_code == 401
+            assert "禁用" in exc.value.detail
+        finally:
+            users_mod.set_user_store(users_mod.UserStore())
+
+    def test_enabled_user_with_record_passes(self, settings: Settings) -> None:
+        from raytrain_server.core import users as users_mod
+        from raytrain_server.core.users import UserRecord
+
+        store = users_mod.UserStore()
+        store.create(UserRecord(user="erin", tenant="t", role="user", enabled=True))
+        users_mod.set_user_store(store)
+        try:
+            token, _ = issue_token("erin", settings=settings)
+            assert require_user(authorization=f"Bearer {token}").user == "erin"
+        finally:
+            users_mod.set_user_store(users_mod.UserStore())
+
 
 class TestRequireAdmin:
     def test_admin_passes(self, settings: Settings) -> None:

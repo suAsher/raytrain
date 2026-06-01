@@ -159,16 +159,29 @@ docker push 172.31.9.104:5050/raytrain/raytrain-console:v0.1
 `raytrain-console/nginx.conf`），所以前端只暴露一个入口。
 
 #### 页面与后端的对接情况
-console 各页面均由后端真实接口驱动（`/v1/console/*` + `/v1/auth`、`/v1/datasets`）：
+console 各页面**全部由后端真实接口驱动**（`/v1/console/*` + `/v1/auth`、`/v1/quota`、
+`/v1/datasets`、`/v1/admin/*`），**无任何前端假数据**：
 - **Overview / Training Jobs / Job Detail / Queues / Experiments / Artifacts**：读
-  `/v1/console/*`，由 `raytrain-server` 的 JobStore / QueueStore 提供，含时间线、
-  Pods、Events、Logs、Metrics、Artifacts（按 job 确定性派生）。
-- **Create Job / Cancel / Retry**：写 `/v1/console/jobs*`，落库为平台 job 记录。
-- **登录 / 身份**：`/v1/auth/me`；**Datasets**：`/v1/datasets`。
-- 首次启动后端会**种入一批示例 job**（`RAYTRAIN_SEED_DEMO=true`，生产可设 false），
-  让控制台开箱即有内容；真实提交会与之并列。
-- 真正把训练**跑到 GPU 集群**仍需配置 `SHARED_CLUSTERS` + KubeRay（见 §4.1）。仅当
-  后端整体不可达时，前端顶部才会显示「演示数据」降级提示。
+  `/v1/console/*`，由 `raytrain-server` 的持久化 Store 提供。
+- **Queues** 直接读集群 **真实 Kueue**（ClusterQueue/LocalQueue），不再有硬编码队列；
+  集群读不到队列时显式报错，不回退假数据。
+- **Job Detail · 日志**走 **Loki**（按 submission_id，结束后仍可查），**指标**走
+  **Prometheus**，都带 `source` 标注；未配置/任务未真实提交时显示「不可用」而非伪造。
+- **Job Detail · Pods/Events**：live 任务按 `ray.io/job-submission-id` 读**真实 Pod 与
+  K8s 事件**（事件原因翻译为可读中文）；非 live 显式标注「未真实提交到集群」。
+- **Artifacts**：从对象存储（MinIO/S3）按 job 的 checkpoint 前缀**真实列举**产物
+  （checkpoint/model/log/eval 自动分类）；未配 MinIO 或非 `s3://` 路径时显式「不可用」。
+- **Create Job**：项目/镜像下拉来自 `/v1/admin/resources/*`，队列候选来自真实 Kueue；
+  无可用队列时**阻止提交**并提示。提交无集群的 gpu_type 会被后端拒绝（除非显式开
+  `RAYTRAIN_ALLOW_RECORD_ONLY_SUBMIT`）。
+- **开发机（Workspaces/DevSessions）**：状态由后端从 K8s **真实派生**（creating/starting/
+  running/stopping/stopped/error + pod_phase + reason），**不再直接显示 running**；IDE/SSH
+  入口仅在 `running` 时可点，否则禁用并提示；URL 由 NodePort 拼出（见 §8）。
+- **登录 / 身份**：账号密码登录（JWT），`/v1/auth/me` + `/v1/quota`（顶栏配额）。
+- **i18n**：顶栏「中文 / EN」一键切换，localStorage 持久化，默认中文，缺失键回退中文；
+  后端 FriendlyError 按错误码本地化。
+- 生产将 `RAYTRAIN_SEED_DEMO=false` 且 `RAYTRAIN_DATABASE_URL` 指向 Postgres，控制台
+  只显示真实数据；列表为空时显示空状态（不再有示例 seed、不再有「演示数据」降级横幅）。
 
 ### 4.3 第一个管理员登录（账号密码，推荐）
 
@@ -233,7 +246,44 @@ kubectl -n raytrain-system logs deploy/raytrain-server --tail=50
 
 ---
 
-## 7. 与 CLI 路线的关系
+## 7. 访问入口：NodePort（当前策略）与 HTTPS 演进
+
+本期**统一用 NodePort 暴露入口**（不引入 Ingress），换取部署简单、少依赖：
+
+| 入口 | Service | 端口 | 说明 |
+| --- | --- | --- | --- |
+| 控制台前端 | `raytrain-web`（console） | NodePort 30880 | 浏览器访问 `http://<节点IP>:30880` |
+| 后端 API | `raytrain-server-nodeport` | NodePort 30810 | 健康检查/直连；前端 nginx 已反代 `/v1` |
+| 开发机 IDE/SSH | `ws-<id>`（每台开发机一个 NodePort Service） | K8s 自动分配 | 后端读回 nodePort + 节点地址拼 URL |
+
+**开发机 IDE/SSH 怎么连**：
+- 后端创建开发机时建 `type: NodePort` 的 Service（Jupyter/code-server/PyCharm/SSH 四端口）。
+- 状态变 `running` 后，后端用 `service_node_ports()` 读回每个端口的 nodePort，用
+  `RAYTRAIN_WORKSPACE_NODE_HOST`（未配置则取 Pod 所在节点的 ExternalIP/InternalIP）拼出：
+  - Jupyter：`http://<node>:<nodePort>/`
+  - VS Code：`http://<node>:<nodePort>/`
+  - SSH：`ssh://<node>:<nodePort>`
+- 前端仅在开发机 `running` 时显示这些链接；未就绪显示「未就绪」提示（不给死链接）。
+- 建议把 `RAYTRAIN_WORKSPACE_NODE_HOST` 设成一个稳定可达的节点地址（或 LB IP），
+  避免 Pod 漂移到无外网 IP 的节点导致 URL 不可达。
+
+> ⚠️ **JWT-over-HTTP 风险标注**：NodePort 是明文 HTTP，登录 JWT 在网络上**不加密传输**。
+> 仅适用于**可信内网 / PoC**。生产对外暴露前必须上 TLS（见下）。
+
+### HTTPS 演进（后续，分步可回退）
+
+1. **加 Ingress + TLS**：部署 ingress-controller（如 ingress-nginx），为
+   `raytrain-web` / `raytrain-server` 建 Ingress，用 cert-manager 签发证书，
+   对外只暴露 443。前端 `/v1` 反代不变。
+2. **开发机走 Ingress 子域**：把每台开发机的 IDE 从 NodePort 改为
+   `https://ws-<id>.<base-domain>/...`（代码已有 `build_ide_urls(base_domain)` 备用路径，
+   设 `RAYTRAIN_WORKSPACE_BASE_DOMAIN` 即可切换），需要泛域名证书 + 通配 DNS。
+3. **回退排查**：若 Ingress 异常，临时回退到 NodePort（两套 Service 可并存），
+   按上表用 `http://<节点IP>:300xx` 直连定位问题；确认 TLS 链路恢复后再摘除 NodePort。
+
+---
+
+## 8. 与 CLI 路线的关系
 
 `raytrain/`（CLI）和这套平台是**同一后端的两个入口**：
 - 浏览器用户 → `raytrain-console` → `raytrain-server`

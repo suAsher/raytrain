@@ -2,7 +2,7 @@
   "name": "raytrain-console",
   "version": "0.1.0",
   "private": true,
-  "description": "raytrain training platform console (KubeRay + Kueue) — high-fidelity prototype with mock data",
+  "description": "raytrain training platform console (KubeRay + Kueue) — real-data training workbench (中/EN)",
   "type": "module",
   "scripts": {
     "dev": "vite",

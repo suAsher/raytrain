@@ -23,6 +23,7 @@ from .api import health as health_api
 from .api import jobs as jobs_api
 from .api import workspaces as workspaces_api
 from .core.bootstrap import configure_persistence
+from .core.errors import install_error_handlers
 from .core.reclaim import ReclaimLoop
 from .core.settings import Settings, get_settings
 from .core.store import get_devsession_store
@@ -69,8 +70,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Bootstrap a username/password admin so a fresh platform has a login
         # without exec-ing into the pod (no-op if disabled or already present).
         _bootstrap_admin(s)
-        # Seed demo job records so the console isn't empty on first boot.
-        if s.seed_demo:
+        # Seed demo job records so the console isn't empty on first boot —
+        # only in in-memory mode. With a real database we never write demo data
+        # (Req 14.6: no seed data masquerading as real).
+        if s.seed_demo and not s.database_url:
             from .core.seed import seed_demo_jobs
 
             seed_demo_jobs()
@@ -79,10 +82,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         loop = ReclaimLoop(get_devsession_store(), s, interval_s=60)
         loop.start()
         app.state.reclaim_loop = loop
+        # Start the background status reconciler so live job statuses advance
+        # without a user opening the list/detail page (Req 5.7).
+        from .core.jobs_store import get_job_store
+        from .core.status_reconciler import StatusReconcileLoop
+        from .core.submission_service import get_submission_service
+
+        rloop = StatusReconcileLoop(
+            get_job_store(), get_submission_service(),
+            interval_s=s.status_reconcile_interval_s,
+        )
+        rloop.start()
+        app.state.status_reconcile_loop = rloop
         try:
             yield
         finally:
             loop.stop()
+            rloop.stop()
 
     app = FastAPI(
         title="raytrain Platform API",
@@ -102,6 +118,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+    install_error_handlers(app)
 
     app.include_router(health_api.router)
     app.include_router(auth_api.router)

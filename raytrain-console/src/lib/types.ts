@@ -1,5 +1,5 @@
-// Domain model for the training console. These mirror what the backend would
-// return once wired up; for the prototype they are populated from mock data.
+// Domain model for the training console. These mirror the shapes returned by
+// raytrain-server's /v1/console/* endpoints (all real data).
 
 export type JobStatus =
   | "Running"
@@ -105,7 +105,7 @@ export interface Job {
   mounts: JobMounts;
   failure?: FailureInfo;
   description?: string;
-  // detail payloads (present for richer mock)
+  // rich detail payloads (populated by the Job Detail endpoint)
   timeline?: TimelinePhase[];
   pods?: PodInfo[];
   events?: K8sEvent[];
@@ -123,6 +123,12 @@ export interface Job {
   // set by the backend when the job was really submitted to a Ray cluster
   live?: boolean;
   submissionId?: string;
+  // "k8s" when pods/events are read from the live cluster, "unavailable" when
+  // the job isn't live (no synthesized pods/events — Req 14.5).
+  pods_source?: "k8s" | "unavailable";
+  // "minio" when artifacts are listed from object storage, "unavailable" when
+  // there's no checkpoint URI / store (no synthesized artifacts — Req 14.6).
+  artifacts_source?: "minio" | "unavailable";
 }
 
 export interface Queue {

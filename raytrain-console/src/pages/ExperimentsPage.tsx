@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { FlaskConical, GitBranch, Copy, RotateCw } from "lucide-react";
+import { FlaskConical, GitBranch, Copy, RotateCw, Loader } from "lucide-react";
 import { PageHeader, Panel } from "../components/primitives";
 import { fetchExperiments } from "../lib/consoleApi";
 import type { Experiment } from "../lib/types";
@@ -11,9 +11,12 @@ export function ExperimentsPage() {
   const nav = useNavigate();
   const { retryJob } = useStore();
   const [experiments, setExperiments] = useState<Experiment[]>([]);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
     let alive = true;
-    fetchExperiments().then((e) => alive && setExperiments(e));
+    fetchExperiments()
+      .then((e) => alive && setExperiments(e))
+      .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
@@ -21,6 +24,12 @@ export function ExperimentsPage() {
   return (
     <div>
       <PageHeader title="Experiments" subtitle="实验分组与复现。Clone 复用配置，Retry 保留原配置生成新 run" />
+      {loading && <div className="py-12 text-center text-ink3"><Loader size={18} className="mx-auto animate-spin" /></div>}
+      {!loading && experiments.length === 0 && (
+        <Panel bodyClass="py-12 text-center text-ink3">
+          还没有实验。实验由训练任务自动聚合（按 experiment 或 project 分组），提交训练后会出现在这里。
+        </Panel>
+      )}
       <div className="grid grid-cols-2 gap-3">
         {experiments.map((e) => (
           <Panel key={e.id} bodyClass="p-4">

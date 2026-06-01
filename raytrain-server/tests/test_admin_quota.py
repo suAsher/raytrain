@@ -220,7 +220,10 @@ def test_disabled_user_blocked(client, settings):
     client.patch("/v1/admin/users/alice", headers=ah, json={"enabled": False})
     r = client.post("/v1/jobs", headers=_user_h(settings),
                     json=_submit_body(gpus_per_node=1))
-    assert r.status_code == 403
+    # A disabled user is now rejected at auth (require_user re-checks the live
+    # enabled state) — stronger than the old quota-layer 403: a revoked user
+    # can't reach ANY authenticated endpoint, even with a valid unexpired JWT.
+    assert r.status_code == 401
     assert "禁用" in r.json()["detail"]
 
 

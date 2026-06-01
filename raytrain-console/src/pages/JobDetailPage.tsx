@@ -5,11 +5,11 @@ import {
   Ban,
   RotateCw,
   Copy,
-  ExternalLink,
   AlertTriangle,
   ScrollText,
   Activity,
   ChevronRight,
+  Loader,
 } from "lucide-react";
 import { Panel, Tabs } from "../components/primitives";
 import { StatusBadge, GpuTypeBadge, QueueBadge } from "../components/badges";
@@ -26,19 +26,26 @@ import { useStore } from "../lib/store";
 import { fetchJob } from "../lib/consoleApi";
 import type { Job } from "../lib/types";
 import { fmtDuration, fmtRelative } from "../lib/format";
+import { useI18n } from "../i18n";
 
 export function JobDetailPage() {
   const { jobId } = useParams();
   const nav = useNavigate();
+  const { t } = useI18n();
   const { getJob, cancelJob, retryJob } = useStore();
   const [sp, setSp] = useSearchParams();
   const [tab, setTab] = useState(sp.get("tab") || "overview");
   // Prefer the rich detail payload from the backend; fall back to the list
-  // record already in the store while it loads (or if backend is unavailable).
+  // record already in the store while it loads.
   const [detail, setDetail] = useState<Job | undefined>(undefined);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
     let alive = true;
-    if (jobId) fetchJob(jobId).then((j) => alive && setDetail(j));
+    setLoading(true);
+    if (jobId)
+      fetchJob(jobId)
+        .then((j) => alive && setDetail(j))
+        .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
@@ -48,30 +55,36 @@ export function JobDetailPage() {
   if (!job) {
     return (
       <div className="py-20 text-center text-ink3">
-        <p>找不到任务 {jobId}</p>
-        <button className="btn mt-4" onClick={() => nav("/jobs")}>
-          <ArrowLeft size={14} /> 返回任务列表
-        </button>
+        {loading ? (
+          <Loader size={18} className="mx-auto animate-spin" />
+        ) : (
+          <>
+            <p>{t("jd.notFound", { id: jobId || "" })}</p>
+            <button className="btn mt-4" onClick={() => nav("/jobs")}>
+              <ArrowLeft size={14} /> {t("jd.backList")}
+            </button>
+          </>
+        )}
       </div>
     );
   }
 
-  const changeTab = (t: string) => {
-    setTab(t);
-    setSp(t === "overview" ? {} : { tab: t });
+  const changeTab = (tk: string) => {
+    setTab(tk);
+    setSp(tk === "overview" ? {} : { tab: tk });
   };
 
   const canCancel = job.status === "Running" || job.status === "Queued";
   const warnCount = (job.events || []).filter((e) => e.type === "Warning").length;
 
   const tabs = [
-    { key: "overview", label: "Overview" },
-    { key: "logs", label: "Logs" },
-    { key: "events", label: "Events", count: warnCount || undefined },
-    { key: "pods", label: "Pods", count: job.pods?.length },
-    { key: "metrics", label: "Metrics" },
-    { key: "config", label: "Config" },
-    { key: "artifacts", label: "Artifacts", count: job.artifacts?.length || undefined },
+    { key: "overview", label: t("jd.tabOverview") },
+    { key: "logs", label: t("jd.tabLogs") },
+    { key: "events", label: t("jd.tabEvents"), count: warnCount || undefined },
+    { key: "pods", label: t("jd.tabPods"), count: job.pods?.length },
+    { key: "metrics", label: t("jd.tabMetrics") },
+    { key: "config", label: t("jd.tabConfig") },
+    { key: "artifacts", label: t("jd.tabArtifacts"), count: job.artifacts?.length || undefined },
   ];
 
   const totalGpu = job.resources.nodes * job.resources.gpusPerNode;
@@ -79,7 +92,7 @@ export function JobDetailPage() {
   return (
     <div>
       <button className="mb-3 flex items-center gap-1 text-xs text-ink3 hover:text-ink2" onClick={() => nav("/jobs")}>
-        <ArrowLeft size={13} /> Training Jobs
+        <ArrowLeft size={13} /> {t("jd.back")}
       </button>
 
       {/* summary header */}
@@ -90,7 +103,7 @@ export function JobDetailPage() {
             <StatusBadge status={job.status} dot />
             {job.live && (
               <span className="chip border-succeeded/40 bg-succeeded/10 text-succeeded" title={`Ray submission: ${job.submissionId}`}>
-                ● LIVE on cluster
+                {t("jd.live")}
               </span>
             )}
           </div>
@@ -99,15 +112,15 @@ export function JobDetailPage() {
               <QueueBadge name={job.queue} />
             </span>
             <GpuTypeBadge type={job.resources.gpuType} />
-            <span>{job.resources.nodes} nodes · {totalGpu || 0} GPU</span>
-            <span>duration {fmtDuration(job.durationSec)}</span>
-            <span>by {job.creator}</span>
-            <span>created {fmtRelative(job.createdAt)}</span>
+            <span>{t("jd.nodesGpu", { nodes: job.resources.nodes, gpu: totalGpu || 0 })}</span>
+            <span>{t("jd.duration")} {fmtDuration(job.durationSec)}</span>
+            <span>{t("jd.by")} {job.creator}</span>
+            <span>{t("jd.createdAt")} {fmtRelative(job.createdAt)}</span>
           </div>
         </div>
         <div className="flex flex-shrink-0 items-center gap-2">
           <button className="btn" disabled={!canCancel} onClick={() => cancelJob(job.id)}>
-            <Ban size={14} /> Cancel
+            <Ban size={14} /> {t("jd.cancel")}
           </button>
           <button
             className="btn"
@@ -116,13 +129,10 @@ export function JobDetailPage() {
               nav(`/jobs/${id}`);
             }}
           >
-            <RotateCw size={14} /> Retry
+            <RotateCw size={14} /> {t("jd.retry")}
           </button>
           <button className="btn" onClick={() => nav(`/jobs/new?clone=${job.id}`)}>
-            <Copy size={14} /> Clone
-          </button>
-          <button className="btn" onClick={() => window.alert("打开 Ray Dashboard（mock）")}>
-            <ExternalLink size={14} /> Dashboard
+            <Copy size={14} /> {t("jd.clone")}
           </button>
         </div>
       </div>
@@ -139,10 +149,10 @@ export function JobDetailPage() {
             <p className="mt-1 text-[13px] text-ink2">{job.failure.detail}</p>
             <div className="mt-2 flex gap-2">
               <button className="btn btn-sm" onClick={() => changeTab("logs")}>
-                <ScrollText size={12} /> 查看错误日志
+                <ScrollText size={12} /> {t("jd.viewErrLog")}
               </button>
               <button className="btn btn-sm" onClick={() => changeTab("events")}>
-                <Activity size={12} /> 查看事件
+                <Activity size={12} /> {t("jd.viewEvents")}
               </button>
               <button
                 className="btn btn-sm btn-primary"
@@ -151,7 +161,7 @@ export function JobDetailPage() {
                   nav(`/jobs/${id}`);
                 }}
               >
-                <RotateCw size={12} /> Retry（保留原配置）
+                <RotateCw size={12} /> {t("jd.retryKeep")}
               </button>
             </div>
           </div>
@@ -168,12 +178,12 @@ export function JobDetailPage() {
           </Panel>
         )}
         {tab === "events" && (
-          <Panel title="Kubernetes Events（已翻译为可读原因）" bodyClass="px-4 py-1">
+          <Panel title={t("jd.events")} bodyClass="px-4 py-1">
             <EventTimeline job={job} />
           </Panel>
         )}
         {tab === "pods" && (
-          <Panel title="Ray Pods" bodyClass="p-4">
+          <Panel title={t("jd.rayPods")} bodyClass="p-4">
             <PodTable job={job} />
           </Panel>
         )}
@@ -189,16 +199,17 @@ export function JobDetailPage() {
   );
 }
 
-function OverviewTab({ job }: { job: ReturnType<typeof useStore>["jobs"][number] }) {
+function OverviewTab({ job }: { job: Job }) {
+  const { t } = useI18n();
   const totalGpu = job.resources.nodes * job.resources.gpusPerNode;
   return (
     <div className="space-y-3">
-      <Panel title="状态时间线">
+      <Panel title={t("jd.timeline")}>
         <JobTimeline job={job} />
       </Panel>
 
       <div className="grid grid-cols-3 gap-3">
-        <Panel title="资源摘要" className="col-span-1">
+        <Panel title={t("jd.resSummary")} className="col-span-1">
           <dl className="space-y-2 text-[13px]">
             <Row k="GPU Type" v={<GpuTypeBadge type={job.resources.gpuType} />} />
             <Row k="Nodes × GPU" v={`${job.resources.nodes} × ${job.resources.gpusPerNode} = ${totalGpu}`} />
@@ -209,7 +220,7 @@ function OverviewTab({ job }: { job: ReturnType<typeof useStore>["jobs"][number]
           </dl>
         </Panel>
 
-        <Panel title="数据与 checkpoint" className="col-span-2">
+        <Panel title={t("jd.dataCkpt")} className="col-span-2">
           <dl className="space-y-2 text-[13px]">
             <Row k="Dataset" v={<code className="text-xs text-ink2">{job.mounts.dataset.uri} → {job.mounts.dataset.path} ({job.mounts.dataset.mode})</code>} />
             <Row
@@ -230,7 +241,7 @@ function OverviewTab({ job }: { job: ReturnType<typeof useStore>["jobs"][number]
       </div>
 
       {job.failure && (
-        <Panel title="失败原因摘要">
+        <Panel title={t("jd.failSummary")}>
           <div className="flex items-start gap-2 text-[13px]">
             <ChevronRight size={14} className="mt-0.5 text-failed" />
             <div>

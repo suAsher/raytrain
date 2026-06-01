@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Check,
   X,
@@ -23,11 +23,18 @@ import {
   YAxis,
   Tooltip,
   CartesianGrid,
-  Legend,
 } from "recharts";
-import type { Job, LogLine, MetricSeries } from "../lib/types";
+import type { Job, MetricSeries } from "../lib/types";
 import { fmtAge, fmtClock } from "../lib/format";
 import { Panel } from "./primitives";
+import {
+  fetchJobLogs,
+  fetchJobMetrics,
+  type LogLineResp,
+  type MetricSeriesResp,
+} from "../lib/consoleApi";
+import { errMsg } from "../lib/api";
+import { useI18n } from "../i18n";
 
 // ---------------- JobTimeline ----------------
 
@@ -67,47 +74,72 @@ export function JobTimeline({ job }: { job: Job }) {
 
 // ---------------- LogViewer ----------------
 
-const CONTAINER_LEVEL_COLOR: Record<LogLine["level"], string> = {
+const LEVEL_COLOR: Record<string, string> = {
   INFO: "text-ink2",
   WARN: "text-queued",
   ERROR: "text-failed",
   DEBUG: "text-ink3",
 };
 
+const LOG_CONTAINERS = ["all", "ray-head", "worker-0", "worker-1", "submitter"];
+
 export function LogViewer({ job }: { job: Job }) {
-  const containers = useMemo(() => {
-    const set = new Set<string>(["all"]);
-    (job.logs || []).forEach((l) => set.add(l.container));
-    return Array.from(set);
-  }, [job.logs]);
-
+  const { t } = useI18n();
   const [container, setContainer] = useState("all");
-  const [follow, setFollow] = useState(job.status === "Running");
+  const [follow, setFollow] = useState(false);
   const [q, setQ] = useState("");
-  // When the job is live (real Ray submission), fetch real logs from the
-  // server's streaming endpoint; otherwise show the derived demo logs.
-  const [liveText, setLiveText] = useState<string | null>(null);
-  const isLive = Boolean(job.live);
-  const loadLive = () => {
-    fetch(`/v1/console/jobs/${job.id}/logs`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem("raytrain.console.token") || ""}` },
-    })
-      .then((r) => r.text())
-      .then(setLiveText)
-      .catch(() => setLiveText(null));
-  };
+  const [lines, setLines] = useState<LogLineResp[]>([]);
+  const [source, setSource] = useState<"loki" | "unavailable" | "">("");
+  const [reason, setReason] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
 
-  const errorAnchor = job.failure?.logAnchor;
-
-  const lines = (job.logs || []).filter(
-    (l) => (container === "all" || l.container === container) && (!q || l.text.toLowerCase().includes(q.toLowerCase()))
+  const load = useMemo(
+    () => () => {
+      setLoading(true);
+      setErr("");
+      fetchJobLogs(job.id, container)
+        .then((r) => {
+          setLines(r.lines || []);
+          setSource(r.source);
+          setReason(r.reason || "");
+        })
+        .catch((e) => setErr(errMsg(e)))
+        .finally(() => setLoading(false));
+    },
+    [job.id, container]
   );
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // follow: poll every 3s while enabled
+  useEffect(() => {
+    if (!follow) return;
+    const id = setInterval(load, 3000);
+    return () => clearInterval(id);
+  }, [follow, load]);
+
+  const shown = lines.filter(
+    (l) => !q || (l.text || "").toLowerCase().includes(q.toLowerCase())
+  );
+
+  const download = () => {
+    const text = lines.map((l) => `${l.ts || ""} ${l.container || ""} ${l.level || ""} ${l.text}`).join("\n");
+    const blob = new Blob([text], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${job.name || job.id}.log`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
 
   return (
     <div>
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-1 rounded-md border border-border bg-panel p-0.5">
-          {containers.map((c) => (
+          {LOG_CONTAINERS.map((c) => (
             <button
               key={c}
               onClick={() => setContainer(c)}
@@ -121,48 +153,51 @@ export function LogViewer({ job }: { job: Job }) {
         </div>
         <div className="relative w-48">
           <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-ink3" />
-          <input className="input py-1 pl-7 text-xs" placeholder="grep logs…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input className="input py-1 pl-7 text-xs" placeholder={t("log.search")} value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
         <button className={`btn btn-sm ${follow ? "btn-primary" : ""}`} onClick={() => setFollow((v) => !v)}>
           {follow ? <Pause size={12} /> : <Play size={12} />}
-          {follow ? "Following" : "Follow"}
+          {follow ? t("log.following") : t("log.follow")}
         </button>
-        <button className="btn btn-sm">
-          <Download size={12} /> Download
+        <button className="btn btn-sm" onClick={download} disabled={lines.length === 0}>
+          <Download size={12} /> {t("log.download")}
         </button>
-        {isLive && (
-          <button className="btn btn-sm" onClick={loadLive} title="从 Ray 拉取真实日志">
-            <Activity size={12} /> 实时日志
-          </button>
-        )}
-        {job.failure && (
-          <span className="ml-auto flex items-center gap-1 text-xs text-failed">
-            <AlertTriangle size={12} /> 已跳转到错误附近
+        {source === "loki" && (
+          <span className="ml-auto flex items-center gap-1 text-xs text-ink3">
+            <Activity size={12} /> {t("log.source")}: {t("log.fromLoki")}
           </span>
         )}
       </div>
-      {liveText !== null ? (
-        <pre className="max-h-[440px] overflow-auto rounded-md border border-border bg-[#0b0f14] p-3 font-mono text-[12px] leading-relaxed text-ink2 whitespace-pre-wrap">
-          {liveText || "（暂无日志输出）"}
-        </pre>
+
+      {err && (
+        <div className="mb-2 flex items-center gap-2 rounded-md border border-failed/30 bg-failed/10 px-3 py-2 text-xs text-failed">
+          <AlertTriangle size={13} /> {err}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="py-10 text-center text-ink3"><Loader size={16} className="mx-auto animate-spin" /></div>
+      ) : source === "unavailable" ? (
+        <div className="rounded-md border border-border bg-panel2 px-4 py-8 text-center text-[13px] text-ink3">
+          <AlertTriangle size={18} className="mx-auto mb-2 text-queued" />
+          {t("log.unavailable")}
+          {reason && <div className="mt-1 text-xs">{reason}</div>}
+        </div>
       ) : (
-      <div className="max-h-[440px] overflow-auto rounded-md border border-border bg-[#0b0f14] p-3 font-mono text-[12px] leading-relaxed">
-        {lines.map((l, i) => {
-          const isErr = errorAnchor != null && i >= errorAnchor - 1 && l.level === "ERROR";
-          return (
-            <div
-              key={i}
-              className={`flex gap-3 whitespace-pre-wrap px-1 ${isErr ? "rounded bg-failed/10" : ""}`}
-            >
-              <span className="flex-shrink-0 text-ink3">{fmtClock(l.ts)}</span>
-              <span className="flex-shrink-0 text-violet-300/70">{l.container}</span>
-              <span className={`flex-shrink-0 ${CONTAINER_LEVEL_COLOR[l.level]}`}>{l.level}</span>
-              <span className={CONTAINER_LEVEL_COLOR[l.level]}>{l.text}</span>
-            </div>
-          );
-        })}
-        {lines.length === 0 && <div className="text-ink3">没有日志输出</div>}
-      </div>
+        <div className="max-h-[440px] overflow-auto rounded-md border border-border bg-[#0b0f14] p-3 font-mono text-[12px] leading-relaxed">
+          {shown.map((l, i) => {
+            const level = (l.level || "INFO").toUpperCase();
+            return (
+              <div key={i} className="flex gap-3 whitespace-pre-wrap px-1">
+                {l.ts && <span className="flex-shrink-0 text-ink3">{fmtClock(l.ts)}</span>}
+                {l.container && <span className="flex-shrink-0 text-violet-300/70">{l.container}</span>}
+                <span className={`flex-shrink-0 ${LEVEL_COLOR[level] || "text-ink2"}`}>{level}</span>
+                <span className={LEVEL_COLOR[level] || "text-ink2"}>{l.text}</span>
+              </div>
+            );
+          })}
+          {shown.length === 0 && <div className="text-ink3">{t("log.none")}</div>}
+        </div>
       )}
     </div>
   );
@@ -171,9 +206,19 @@ export function LogViewer({ job }: { job: Job }) {
 // ---------------- EventTimeline ----------------
 
 export function EventTimeline({ job }: { job: Job }) {
+  const events = job.events || [];
+  if (events.length === 0) {
+    return (
+      <div className="py-8 text-center text-[13px] text-ink3">
+        {job.pods_source === "unavailable" || !job.live
+          ? "任务未真实提交到集群，暂无 K8s 事件"
+          : "暂无事件"}
+      </div>
+    );
+  }
   return (
     <ul className="space-y-0">
-      {(job.events || []).map((e, i) => (
+      {events.map((e, i) => (
         <li key={i} className="flex gap-3 border-b border-border/50 py-2.5 last:border-0">
           <span
             className={`mt-1 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full ${
@@ -197,7 +242,6 @@ export function EventTimeline({ job }: { job: Job }) {
           <span className="flex-shrink-0 text-xs text-ink3">{fmtClock(e.ts)}</span>
         </li>
       ))}
-      {(job.events || []).length === 0 && <li className="py-6 text-center text-ink3">暂无事件</li>}
     </ul>
   );
 }
@@ -205,6 +249,7 @@ export function EventTimeline({ job }: { job: Job }) {
 // ---------------- PodTable ----------------
 
 export function PodTable({ job }: { job: Job }) {
+  const { t } = useI18n();
   const [sel, setSel] = useState<string | null>(null);
   const phaseColor: Record<string, string> = {
     Running: "text-running",
@@ -213,6 +258,17 @@ export function PodTable({ job }: { job: Job }) {
     Failed: "text-failed",
     Terminating: "text-ink3",
   };
+  const pods = job.pods || [];
+  if (job.pods_source !== "k8s" || pods.length === 0) {
+    return (
+      <div className="rounded-md border border-border bg-panel2 px-4 py-10 text-center text-[13px] text-ink3">
+        <AlertTriangle size={18} className="mx-auto mb-2 text-queued" />
+        {job.pods_source === "unavailable" || !job.live
+          ? "任务未真实提交到集群，暂无 Pod 信息（Pod 在任务运行于 Ray 集群后显示）"
+          : t("common.empty")}
+      </div>
+    );
+  }
   return (
     <div>
       <table className="w-full text-[13px]">
@@ -229,7 +285,7 @@ export function PodTable({ job }: { job: Job }) {
           </tr>
         </thead>
         <tbody>
-          {(job.pods || []).map((p) => (
+          {pods.map((p) => (
             <>
               <tr
                 key={p.name}
@@ -277,15 +333,13 @@ export function PodTable({ job }: { job: Job }) {
 function Chart({
   title,
   data,
-  keys,
   unit,
-  colors,
+  color,
 }: {
   title: string;
   data: MetricSeries[];
-  keys: string[];
   unit: string;
-  colors: string[];
+  color: string;
 }) {
   return (
     <Panel title={`${title} ${unit ? `(${unit})` : ""}`} bodyClass="p-2">
@@ -293,16 +347,13 @@ function Chart({
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 8, right: 12, left: -16, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#283039" />
-            <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#697585" }} interval={5} />
+            <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#697585" }} interval="preserveStartEnd" />
             <YAxis tick={{ fontSize: 10, fill: "#697585" }} />
             <Tooltip
               contentStyle={{ background: "#161b22", border: "1px solid #323b46", borderRadius: 6, fontSize: 12 }}
               labelStyle={{ color: "#9aa7b4" }}
             />
-            {keys.length > 1 && <Legend wrapperStyle={{ fontSize: 11 }} />}
-            {keys.map((k, i) => (
-              <Line key={k} type="monotone" dataKey={k} stroke={colors[i]} strokeWidth={1.5} dot={false} isAnimationActive={false} />
-            ))}
+            <Line type="monotone" dataKey="value" stroke={color} strokeWidth={1.5} dot={false} isAnimationActive={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -310,19 +361,80 @@ function Chart({
   );
 }
 
+const METRIC_META: Record<string, { titleKey: string; color: string }> = {
+  gpu_util: { titleKey: "metrics.gpuUtil", color: "#3b82f6" },
+  gpu_mem: { titleKey: "metrics.gpuMem", color: "#22c55e" },
+  throughput: { titleKey: "metrics.throughput", color: "#06b6d4" },
+};
+
 export function MetricsPanel({ job }: { job: Job }) {
-  const m = job.metrics;
-  if (!m || (m.cpu.length === 0 && m.gpuUtil.length === 0)) {
-    return <div className="py-10 text-center text-ink3">任务尚未运行，暂无指标数据</div>;
+  const { t } = useI18n();
+  const [series, setSeries] = useState<MetricSeriesResp[]>([]);
+  const [source, setSource] = useState<"prometheus" | "unavailable" | "">("");
+  const [reason, setReason] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setErr("");
+    fetchJobMetrics(job.id)
+      .then((r) => {
+        if (!alive) return;
+        setSeries(r.series || []);
+        setSource(r.source);
+        setReason(r.reason || "");
+      })
+      .catch((e) => alive && setErr(errMsg(e)))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [job.id]);
+
+  if (loading) {
+    return <div className="py-10 text-center text-ink3"><Loader size={16} className="mx-auto animate-spin" /></div>;
   }
+  if (err) {
+    return (
+      <div className="flex items-center justify-center gap-2 py-10 text-[13px] text-failed">
+        <AlertTriangle size={15} /> {err}
+      </div>
+    );
+  }
+
+  const populated = series.filter((s) => s.points.length > 0);
+  if (source !== "prometheus" || populated.length === 0) {
+    return (
+      <div className="rounded-md border border-border bg-panel2 px-4 py-10 text-center text-[13px] text-ink3">
+        <AlertTriangle size={18} className="mx-auto mb-2 text-queued" />
+        {source === "unavailable" ? t("metrics.unavailable") : t("metrics.none")}
+        {reason && <div className="mt-1 text-xs">{reason}</div>}
+      </div>
+    );
+  }
+
   return (
-    <div className="grid grid-cols-2 gap-3">
-      <Chart title="GPU Utilization" unit="%" data={m.gpuUtil} keys={["worker-0", "worker-1"]} colors={["#3b82f6", "#22c55e"]} />
-      <Chart title="GPU Memory" unit="GiB" data={m.gpuMem} keys={["worker-0", "worker-1"]} colors={["#3b82f6", "#22c55e"]} />
-      <Chart title="CPU" unit="%" data={m.cpu} keys={["value"]} colors={["#8b5cf6"]} />
-      <Chart title="Memory" unit="%" data={m.mem} keys={["value"]} colors={["#f59e0b"]} />
-      <Chart title="Ray Object Store" unit="GiB" data={m.objStore} keys={["value"]} colors={["#06b6d4"]} />
-      <Chart title="Throughput" unit="it/s" data={m.throughput} keys={["value"]} colors={["#22c55e"]} />
+    <div>
+      <div className="mb-2 flex items-center gap-1 text-xs text-ink3">
+        <Activity size={12} /> {t("log.source")}: {t("metrics.fromProm")}
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        {series.map((s) => {
+          const meta = METRIC_META[s.metric] || { titleKey: s.metric, color: "#8b5cf6" };
+          if (s.points.length === 0) return null;
+          return (
+            <Chart
+              key={s.metric}
+              title={t(meta.titleKey)}
+              unit={s.unit}
+              color={meta.color}
+              data={s.points as unknown as MetricSeries[]}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -330,10 +442,11 @@ export function MetricsPanel({ job }: { job: Job }) {
 // ---------------- ConfigPreview ----------------
 
 export function ConfigPreview({ job }: { job: Job }) {
+  const { t } = useI18n();
   const [showYaml, setShowYaml] = useState(false);
   return (
     <div className="space-y-4">
-      <Panel title="用户提交配置">
+      <Panel title={t("jd.userConfig")}>
         <div className="overflow-hidden rounded-md border border-border">
           <table className="w-full text-[13px]">
             <tbody>
@@ -356,7 +469,7 @@ export function ConfigPreview({ job }: { job: Job }) {
         </div>
       </Panel>
 
-      <Panel title="Environment variables">
+      <Panel title={t("jd.envVars")}>
         <div className="flex flex-wrap gap-1.5">
           {job.env.map((e) => (
             <span key={e.key} className="chip border-borderc bg-panel2 font-mono text-xs text-ink2">
@@ -369,7 +482,7 @@ export function ConfigPreview({ job }: { job: Job }) {
       <div>
         <button className="flex items-center gap-2 text-[13px] text-brand hover:underline" onClick={() => setShowYaml((v) => !v)}>
           <ChevronRight size={14} className={showYaml ? "rotate-90 transition-transform" : "transition-transform"} />
-          平台渲染后的 RayJob manifest（默认折叠）
+          {t("jd.rendered")}
         </button>
         {showYaml && (
           <pre className="mt-2 max-h-96 overflow-auto rounded-md border border-border bg-[#0b0f14] p-3 font-mono text-[11px] leading-relaxed text-ink2">
@@ -387,7 +500,14 @@ export function ArtifactsTab({ job }: { job: Job }) {
   const icon = { checkpoint: FileBox, model: Brain, log: FileText, eval: BarChart3 };
   const groups = ["checkpoint", "model", "log", "eval"] as const;
   if ((job.artifacts || []).length === 0) {
-    return <div className="py-10 text-center text-ink3">任务尚未产生 artifacts</div>;
+    return (
+      <div className="rounded-md border border-border bg-panel2 px-4 py-10 text-center text-[13px] text-ink3">
+        <AlertTriangle size={18} className="mx-auto mb-2 text-queued" />
+        {job.artifacts_source === "unavailable" || !job.live
+          ? "暂无产物：任务未真实运行，或 checkpoint 路径不是对象存储（s3://）"
+          : "任务尚未产生 artifacts"}
+      </div>
+    );
   }
   return (
     <div className="space-y-4">

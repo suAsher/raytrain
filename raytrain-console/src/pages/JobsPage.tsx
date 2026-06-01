@@ -6,61 +6,74 @@ import {
   Ban,
   RotateCw,
   Copy,
-  ExternalLink,
   MoreHorizontal,
   Filter,
   X,
+  Loader,
+  AlertTriangle,
 } from "lucide-react";
 import { PageHeader, Panel, Select } from "../components/primitives";
 import { StatusBadge, GpuTypeBadge, QueueBadge, PriorityBadge } from "../components/badges";
 import { useStore } from "../lib/store";
-import { CREATORS, QUEUES } from "../lib/mockData";
 import { fmtDuration, fmtRelative } from "../lib/format";
 import type { Job, JobStatus } from "../lib/types";
+import { useI18n } from "../i18n";
 
 const STATUSES: JobStatus[] = ["Running", "Queued", "Failed", "Succeeded", "Cancelled", "Starting"];
 
 function RowActions({ job }: { job: Job }) {
   const nav = useNavigate();
   const { cancelJob, retryJob } = useStore();
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
   const canCancel = job.status === "Running" || job.status === "Queued";
 
   return (
     <div className="flex items-center justify-end gap-0.5">
-      <button className="btn-ghost rounded p-1.5" title="View" onClick={() => nav(`/jobs/${job.id}`)}>
+      <button className="btn-ghost rounded p-1.5" title={t("jobs.view")} onClick={() => nav(`/jobs/${job.id}`)}>
         <Eye size={14} />
       </button>
-      <button className="btn-ghost rounded p-1.5" title="Logs" onClick={() => nav(`/jobs/${job.id}?tab=logs`)}>
+      <button className="btn-ghost rounded p-1.5" title={t("jobs.logs")} onClick={() => nav(`/jobs/${job.id}?tab=logs`)}>
         <ScrollText size={14} />
       </button>
       <div className="relative">
         <button className="btn-ghost rounded p-1.5" title="More" onClick={() => setOpen((v) => !v)}>
-          <MoreHorizontal size={14} />
+          {busy ? <Loader size={14} className="animate-spin" /> : <MoreHorizontal size={14} />}
         </button>
         {open && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
             <div className="absolute right-0 top-8 z-20 w-44 rounded-md border border-borderc bg-panel2 py-1 shadow-xl">
               <button
-                disabled={!canCancel}
-                onClick={() => {
-                  cancelJob(job.id);
-                  setOpen(false);
+                disabled={!canCancel || busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    await cancelJob(job.id);
+                  } finally {
+                    setBusy(false);
+                    setOpen(false);
+                  }
                 }}
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-ink2 hover:bg-panel disabled:opacity-40"
               >
-                <Ban size={13} /> Cancel
+                <Ban size={13} /> {t("jobs.cancel")}
               </button>
               <button
                 onClick={async () => {
-                  const id = await retryJob(job.id);
-                  setOpen(false);
-                  nav(`/jobs/${id}`);
+                  setBusy(true);
+                  try {
+                    const id = await retryJob(job.id);
+                    setOpen(false);
+                    nav(`/jobs/${id}`);
+                  } finally {
+                    setBusy(false);
+                  }
                 }}
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-ink2 hover:bg-panel"
               >
-                <RotateCw size={13} /> Retry
+                <RotateCw size={13} /> {t("jobs.retry")}
               </button>
               <button
                 onClick={() => {
@@ -69,16 +82,7 @@ function RowActions({ job }: { job: Job }) {
                 }}
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-ink2 hover:bg-panel"
               >
-                <Copy size={13} /> Clone
-              </button>
-              <button
-                onClick={() => {
-                  setOpen(false);
-                  window.alert("打开 Ray Dashboard（mock）: http://ray-shared-h20-head:8265");
-                }}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-ink2 hover:bg-panel"
-              >
-                <ExternalLink size={13} /> Open Ray Dashboard
+                <Copy size={13} /> {t("jobs.clone")}
               </button>
             </div>
           </>
@@ -89,7 +93,8 @@ function RowActions({ job }: { job: Job }) {
 }
 
 export function JobsPage() {
-  const { jobs, project } = useStore();
+  const { jobs, project, me, loading, error } = useStore();
+  const { t } = useI18n();
   const nav = useNavigate();
 
   const [status, setStatus] = useState("all");
@@ -100,6 +105,10 @@ export function JobsPage() {
   const [failureOnly, setFailureOnly] = useState(false);
   const [q, setQ] = useState("");
 
+  // Derive filter option lists from the real jobs.
+  const queueOpts = useMemo(() => Array.from(new Set(jobs.map((j) => j.queue).filter(Boolean))), [jobs]);
+  const creatorOpts = useMemo(() => Array.from(new Set(jobs.map((j) => j.creator).filter(Boolean))), [jobs]);
+
   const filtered = useMemo(() => {
     return jobs.filter((j) => {
       if (project !== "All projects" && j.project !== project) return false;
@@ -107,12 +116,12 @@ export function JobsPage() {
       if (queue !== "all" && j.queue !== queue) return false;
       if (gpu !== "all" && j.resources.gpuType !== gpu) return false;
       if (creator !== "all" && j.creator !== creator) return false;
-      if (onlyMine && j.creator !== "asher") return false;
+      if (onlyMine && me && j.creator !== me.user) return false;
       if (failureOnly && j.status !== "Failed") return false;
       if (q && !j.name.toLowerCase().includes(q.toLowerCase())) return false;
       return true;
     });
-  }, [jobs, project, status, queue, gpu, creator, onlyMine, failureOnly, q]);
+  }, [jobs, project, status, queue, gpu, creator, onlyMine, failureOnly, q, me]);
 
   const reset = () => {
     setStatus("all");
@@ -132,38 +141,39 @@ export function JobsPage() {
   return (
     <div>
       <PageHeader
-        title="Training Jobs"
-        subtitle={`${filtered.length} jobs${project !== "All projects" ? ` · ${project}` : ""}`}
+        title={t("jobs.title")}
+        subtitle={`${t("jobs.count", { n: filtered.length })}${project !== "All projects" ? ` · ${project}` : ""}`}
         actions={
           <button className="btn btn-primary" onClick={() => nav("/jobs/new")}>
-            Create Job
+            {t("jobs.create")}
           </button>
         }
       />
 
+      {error && (
+        <div className="mb-3 flex items-center gap-2 rounded-md border border-failed/30 bg-failed/10 px-3 py-2 text-xs text-failed">
+          <AlertTriangle size={13} /> {error}
+        </div>
+      )}
+
       <Panel className="mb-3" bodyClass="p-3">
         <div className="flex flex-wrap items-center gap-2">
           <Filter size={14} className="text-ink3" />
-          <input
-            placeholder="job name…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            className="input w-40"
-          />
-          <Select value={status} onChange={setStatus} options={opt("All status", STATUSES)} className="w-32" />
-          <Select value={queue} onChange={setQueue} options={opt("All queues", QUEUES)} className="w-36" />
-          <Select value={gpu} onChange={setGpu} options={opt("All GPU", ["H20", "A100", "CPU-only"])} className="w-32" />
-          <Select value={creator} onChange={setCreator} options={opt("All creators", CREATORS)} className="w-36" />
+          <input placeholder={t("jobs.jobName")} value={q} onChange={(e) => setQ(e.target.value)} className="input w-40" />
+          <Select value={status} onChange={setStatus} options={opt(t("jobs.allStatus"), STATUSES)} className="w-32" />
+          <Select value={queue} onChange={setQueue} options={opt(t("jobs.allQueues"), queueOpts)} className="w-36" />
+          <Select value={gpu} onChange={setGpu} options={opt(t("jobs.allGpu"), ["H20", "A100", "CPU-only"])} className="w-32" />
+          <Select value={creator} onChange={setCreator} options={opt(t("jobs.allCreators"), creatorOpts)} className="w-36" />
           <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs text-ink2">
             <input type="checkbox" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} />
-            Only mine
+            {t("jobs.onlyMine")}
           </label>
           <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs text-ink2">
             <input type="checkbox" checked={failureOnly} onChange={(e) => setFailureOnly(e.target.checked)} />
-            Failures only
+            {t("jobs.failuresOnly")}
           </label>
           <button className="btn-ghost flex items-center gap-1 rounded-md px-2 py-1.5 text-xs" onClick={reset}>
-            <X size={12} /> Reset
+            <X size={12} /> {t("jobs.reset")}
           </button>
         </div>
       </Panel>
@@ -173,18 +183,18 @@ export function JobsPage() {
           <table className="w-full text-[13px]">
             <thead>
               <tr className="border-b border-border text-left text-xs text-ink3">
-                <th className="px-3 py-2 font-medium">Job Name</th>
-                <th className="px-3 py-2 font-medium">Status</th>
-                <th className="px-3 py-2 font-medium">Project</th>
-                <th className="px-3 py-2 font-medium">Queue</th>
-                <th className="px-3 py-2 font-medium">GPU</th>
-                <th className="px-3 py-2 text-right font-medium">Nodes</th>
-                <th className="px-3 py-2 text-right font-medium">GPUs</th>
-                <th className="px-3 py-2 font-medium">Image</th>
-                <th className="px-3 py-2 font-medium">Creator</th>
-                <th className="px-3 py-2 text-right font-medium">Duration</th>
-                <th className="px-3 py-2 font-medium">Created</th>
-                <th className="px-3 py-2 text-right font-medium">Actions</th>
+                <th className="px-3 py-2 font-medium">{t("jobs.jobName")}</th>
+                <th className="px-3 py-2 font-medium">{t("common.status")}</th>
+                <th className="px-3 py-2 font-medium">{t("jobs.project")}</th>
+                <th className="px-3 py-2 font-medium">{t("jobs.queue")}</th>
+                <th className="px-3 py-2 font-medium">{t("jobs.gpu")}</th>
+                <th className="px-3 py-2 text-right font-medium">{t("jobs.nodes")}</th>
+                <th className="px-3 py-2 text-right font-medium">{t("jobs.gpus")}</th>
+                <th className="px-3 py-2 font-medium">{t("jobs.image")}</th>
+                <th className="px-3 py-2 font-medium">{t("jobs.creator")}</th>
+                <th className="px-3 py-2 text-right font-medium">{t("jobs.duration")}</th>
+                <th className="px-3 py-2 font-medium">{t("jobs.created")}</th>
+                <th className="px-3 py-2 text-right font-medium">{t("common.actions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -226,7 +236,7 @@ export function JobsPage() {
               {filtered.length === 0 && (
                 <tr>
                   <td colSpan={12} className="px-4 py-10 text-center text-ink3">
-                    没有符合条件的任务
+                    {loading ? <Loader size={16} className="mx-auto animate-spin" /> : t("jobs.none")}
                   </td>
                 </tr>
               )}

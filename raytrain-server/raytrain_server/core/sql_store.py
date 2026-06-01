@@ -331,3 +331,226 @@ class SqlUserStore:
     def list_all(self):
         rows = self._db.query_all("SELECT * FROM users")
         return [self._to_rec(r) for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Jobs (platform-side training job records)
+# --------------------------------------------------------------------------- #
+
+
+class SqlJobStore:
+    """SQL-backed JobStore. Same interface as the in-memory jobs_store.JobStore."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def _to_rec(self, row: dict):
+        from .jobs_store import FailureInfo, JobMounts, JobResources, PlatformJob
+
+        res = loads(row["resources"]) or {}
+        mnt = loads(row["mounts"]) or {}
+        fail_raw = loads(row["failure"]) if row["failure"] else None
+        failure = None
+        if fail_raw:
+            failure = FailureInfo(
+                category=fail_raw.get("category", ""),
+                summary=fail_raw.get("summary", ""),
+                detail=fail_raw.get("detail", ""),
+                container=fail_raw.get("container", ""),
+                log_anchor=int(fail_raw.get("log_anchor", 0) or 0),
+            )
+        return PlatformJob(
+            id=row["id"], name=row["name"], user=row["user"], tenant=row["tenant"],
+            project=row["project"], queue=row["queue"],
+            quota_group=row["quota_group"] or "", priority=row["priority"] or "normal",
+            status=row["status"] or "Queued", image=row["image"] or "",
+            entrypoint=row["entrypoint"] or "", working_dir=row["working_dir"] or "",
+            git_ref=row["git_ref"] or "", env=loads(row["env"]) or {},
+            submission_id=row["submission_id"] or "", code_uri=row["code_uri"] or "",
+            resources=JobResources(**res) if res else JobResources(),
+            mounts=JobMounts(**mnt) if mnt else JobMounts(),
+            failure=failure, description=row["description"] or "",
+            created_at=row["created_at"] or time.time(),
+            started_at=row["started_at"] or 0.0,
+            finished_at=row["finished_at"] or 0.0,
+            experiment=row["experiment"] or "",
+        )
+
+    def _failure_json(self, rec) -> str | None:
+        return dumps(rec.failure.to_dict()) if rec.failure else None
+
+    def create(self, rec):
+        if not rec.id:
+            rec.id = "job-" + uuid.uuid4().hex[:8]
+        self._db.execute(
+            'INSERT INTO jobs (id,name,"user",tenant,project,queue,quota_group,'
+            "priority,status,image,entrypoint,working_dir,git_ref,env,"
+            "submission_id,code_uri,resources,mounts,failure,description,"
+            "experiment,created_at,started_at,finished_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rec.id, rec.name, rec.user, rec.tenant, rec.project, rec.queue,
+             rec.quota_group, rec.priority, rec.status, rec.image, rec.entrypoint,
+             rec.working_dir, rec.git_ref, dumps(rec.env), rec.submission_id,
+             rec.code_uri, dumps(rec.resources.to_dict()), dumps(rec.mounts.to_dict()),
+             self._failure_json(rec), rec.description, rec.experiment,
+             rec.created_at, rec.started_at, rec.finished_at),
+        )
+        return rec
+
+    def get(self, jid: str):
+        row = self._db.query_one("SELECT * FROM jobs WHERE id=?", (jid,))
+        return self._to_rec(row) if row else None
+
+    def update(self, jid: str, **changes):
+        rec = self.get(jid)
+        if not rec:
+            return None
+        for k, v in changes.items():
+            setattr(rec, k, v)
+        self._db.execute(
+            "UPDATE jobs SET name=?,status=?,image=?,entrypoint=?,working_dir=?,"
+            "git_ref=?,env=?,submission_id=?,code_uri=?,resources=?,mounts=?,"
+            "failure=?,description=?,experiment=?,queue=?,quota_group=?,priority=?,"
+            "started_at=?,finished_at=? WHERE id=?",
+            (rec.name, rec.status, rec.image, rec.entrypoint, rec.working_dir,
+             rec.git_ref, dumps(rec.env), rec.submission_id, rec.code_uri,
+             dumps(rec.resources.to_dict()), dumps(rec.mounts.to_dict()),
+             self._failure_json(rec), rec.description, rec.experiment, rec.queue,
+             rec.quota_group, rec.priority, rec.started_at, rec.finished_at, jid),
+        )
+        return rec
+
+    def delete(self, jid: str) -> bool:
+        existed = self.get(jid) is not None
+        self._db.execute("DELETE FROM jobs WHERE id=?", (jid,))
+        return existed
+
+    def list_visible(self, user: str, tenant: str, is_admin: bool):
+        rows = self._db.query_all("SELECT * FROM jobs ORDER BY created_at DESC")
+        recs = [self._to_rec(r) for r in rows]
+        if is_admin:
+            return recs
+        return [j for j in recs if j.user == user or j.tenant == tenant]
+
+    def count_running_gpus(self, user: str) -> int:
+        rows = self._db.query_all('SELECT * FROM jobs WHERE "user"=?', (user,))
+        total = 0
+        for r in rows:
+            if r["status"] in ("Queued", "Starting", "Running"):
+                res = loads(r["resources"]) or {}
+                gt = (res.get("gpu_type") or "").upper()
+                if gt != "CPU-ONLY":
+                    total += int(res.get("nodes", 0) or 0) * int(res.get("gpus_per_node", 0) or 0)
+        return total
+
+
+# --------------------------------------------------------------------------- #
+# Resources (admin catalog: project / quota_group / runtime_image)
+# --------------------------------------------------------------------------- #
+
+
+class SqlResourceStore:
+    """SQL-backed ResourceStore. Same interface as resources_store.ResourceStore."""
+
+    def __init__(self, db: Database, seed: bool = False) -> None:
+        self._db = db
+        if seed and not self._db.query_all("SELECT id FROM resources LIMIT 1"):
+            self._seed()
+
+    def _seed(self) -> None:
+        from .resources_store import ResourceStore
+
+        mem = ResourceStore(seed=True)
+        for kind in ("project", "quota_group", "runtime_image"):
+            for r in mem.list(kind):
+                self._db.execute(
+                    "INSERT INTO resources (id,kind,name,spec,enabled,created_at,"
+                    "updated_at) VALUES (?,?,?,?,?,?,?)",
+                    (r.id, r.kind, r.name, dumps(r.spec), 1 if r.enabled else 0,
+                     r.created_at, r.updated_at),
+                )
+
+    def _to_rec(self, row: dict):
+        from .resources_store import ResourceRecord
+
+        return ResourceRecord(
+            id=row["id"], kind=row["kind"], name=row["name"],
+            spec=loads(row["spec"]) or {}, enabled=bool(row["enabled"]),
+            created_at=row["created_at"] or time.time(),
+            updated_at=row["updated_at"] or time.time(),
+        )
+
+    def list(self, kind: str):
+        rows = self._db.query_all("SELECT * FROM resources WHERE kind=?", (kind,))
+        return [self._to_rec(r) for r in rows]
+
+    def get(self, rid: str):
+        row = self._db.query_one("SELECT * FROM resources WHERE id=?", (rid,))
+        return self._to_rec(row) if row else None
+
+    def create(self, kind: str, name: str, spec: dict):
+        from .resources_store import ResourceRecord
+
+        rid = f"{kind[:3]}-{uuid.uuid4().hex[:8]}"
+        rec = ResourceRecord(id=rid, kind=kind, name=name, spec=spec or {})
+        self._db.execute(
+            "INSERT INTO resources (id,kind,name,spec,enabled,created_at,"
+            "updated_at) VALUES (?,?,?,?,?,?,?)",
+            (rec.id, rec.kind, rec.name, dumps(rec.spec), 1 if rec.enabled else 0,
+             rec.created_at, rec.updated_at),
+        )
+        return rec
+
+    def update(self, rid: str, **changes):
+        rec = self.get(rid)
+        if not rec:
+            return None
+        for k, v in changes.items():
+            setattr(rec, k, v)
+        rec.updated_at = time.time()
+        self._db.execute(
+            "UPDATE resources SET name=?,spec=?,enabled=?,updated_at=? WHERE id=?",
+            (rec.name, dumps(rec.spec), 1 if rec.enabled else 0, rec.updated_at, rid),
+        )
+        return rec
+
+    def delete(self, rid: str) -> bool:
+        existed = self.get(rid) is not None
+        self._db.execute("DELETE FROM resources WHERE id=?", (rid,))
+        return existed
+
+
+# --------------------------------------------------------------------------- #
+# Queue display metadata (platform-owned only; usage comes live from Kueue)
+# --------------------------------------------------------------------------- #
+
+
+class SqlQueueMetaStore:
+    """Persists only display alias/sort for queues. Usage is never stored here."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def get(self, name: str) -> dict | None:
+        return self._db.query_one("SELECT * FROM queue_meta WHERE name=?", (name,))
+
+    def list_all(self) -> list[dict]:
+        return self._db.query_all("SELECT * FROM queue_meta")
+
+    def upsert(self, name: str, display_alias: str = "", sort_order: int = 0) -> None:
+        if self.get(name):
+            self._db.execute(
+                "UPDATE queue_meta SET display_alias=?,sort_order=? WHERE name=?",
+                (display_alias, sort_order, name),
+            )
+        else:
+            self._db.execute(
+                "INSERT INTO queue_meta (name,display_alias,sort_order,created_at) "
+                "VALUES (?,?,?,?)",
+                (name, display_alias, sort_order, time.time()),
+            )
+
+    def delete(self, name: str) -> bool:
+        existed = self.get(name) is not None
+        self._db.execute("DELETE FROM queue_meta WHERE name=?", (name,))
+        return existed

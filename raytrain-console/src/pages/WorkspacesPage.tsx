@@ -11,6 +11,7 @@ import {
   TerminalSquare,
   Zap,
   ExternalLink,
+  AlertTriangle,
 } from "lucide-react";
 import { PageHeader, Panel, Modal, Field, Select } from "../components/primitives";
 import {
@@ -24,16 +25,20 @@ import {
   type DevSession,
 } from "../lib/consoleApi";
 import { errMsg } from "../lib/api";
+import { useI18n } from "../i18n";
 
 function stateChip(state: string) {
   const s = state.toLowerCase();
   if (s === "running") return "border-succeeded/40 bg-succeeded/10 text-succeeded";
   if (s === "creating" || s === "starting") return "border-queued/40 bg-queued/10 text-queued";
+  if (s === "stopping") return "border-queued/40 bg-queued/10 text-queued";
+  if (s === "error") return "border-failed/40 bg-failed/10 text-failed";
   if (s === "stopped" || s === "expired") return "border-cancelled/40 bg-cancelled/10 text-ink3";
   return "border-borderc bg-panel2 text-ink2";
 }
 
 export function WorkspacesPage() {
+  const { t } = useI18n();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [sessions, setSessions] = useState<DevSession[]>([]);
   const [loading, setLoading] = useState(true);
@@ -59,15 +64,15 @@ export function WorkspacesPage() {
   return (
     <div>
       <PageHeader
-        title="开发机 Workspaces"
-        subtitle="浏览器内的个人开发环境（Jupyter / VS Code / SSH）+ 按需挂 GPU 调试。代码改完直接提交训练（code-as-submission）"
+        title={t("ws.title")}
+        subtitle={t("ws.subtitle")}
         actions={
           <div className="flex items-center gap-2">
-            <button className="btn-ghost rounded p-1.5 text-ink3" onClick={load} title="刷新">
+            <button className="btn-ghost rounded p-1.5 text-ink3" onClick={load} title={t("common.refresh")}>
               <RefreshCw size={14} />
             </button>
             <button className="btn btn-primary" onClick={() => setCreateWs(true)}>
-              <Plus size={14} /> 新建开发机
+              <Plus size={14} /> {t("ws.new")}
             </button>
           </div>
         }
@@ -81,15 +86,15 @@ export function WorkspacesPage() {
         </div>
       )}
 
-      {!loading && workspaces.length === 0 && (
-        <Panel bodyClass="py-12 text-center text-ink3">
-          还没有开发机。点右上角「新建开发机」创建一台（CPU + 持久卷），进 IDE 写代码。
-        </Panel>
+      {!loading && workspaces.length === 0 && !err && (
+        <Panel bodyClass="py-12 text-center text-ink3">{t("ws.empty")}</Panel>
       )}
 
       <div className="space-y-3">
         {workspaces.map((ws) => {
           const sess = sessFor(ws.id);
+          const isRunning = ws.state === "running";
+          const ideLinks = Object.entries(ws.ide_urls || {});
           return (
             <Panel key={ws.id} bodyClass="p-0">
               <div className="flex items-center justify-between border-b border-border px-4 py-3">
@@ -104,31 +109,53 @@ export function WorkspacesPage() {
                     <div className="mt-0.5 text-xs text-ink3">
                       {ws.cpu} vCPU · {ws.memory_gi} GiB · PVC {ws.pvc_gi} GiB · {ws.image}
                     </div>
+                    {ws.reason && (
+                      <div className="mt-1 flex items-center gap-1 text-xs text-failed">
+                        <AlertTriangle size={12} /> {ws.reason}
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-1">
-                  {Object.entries(ws.ide_urls || {}).map(([k, url]) => (
-                    <a key={k} href={url} target="_blank" rel="noreferrer" className="btn btn-sm">
-                      {k === "ssh" ? <TerminalSquare size={12} /> : <ExternalLink size={12} />} {k}
-                    </a>
-                  ))}
-                  <button className="btn btn-sm" onClick={() => setGpuFor(ws)} title="挂 GPU 调试会话">
-                    <Zap size={12} /> 挂 GPU
+                  {/* IDE/SSH entries only when truly running (Req 3.6) */}
+                  {isRunning && ideLinks.length > 0 ? (
+                    ideLinks.map(([k, url]) => (
+                      <a key={k} href={url} target="_blank" rel="noreferrer" className="btn btn-sm">
+                        {k === "ssh" ? <TerminalSquare size={12} /> : <ExternalLink size={12} />} {k}
+                      </a>
+                    ))
+                  ) : (
+                    <span className="mr-1 text-xs text-ink3" title={t("ws.notReady")}>
+                      {t("ws.notReady")}
+                    </span>
+                  )}
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => setGpuFor(ws)}
+                    title={t("ws.attachGpuTitle")}
+                    disabled={!isRunning}
+                  >
+                    <Zap size={12} /> {t("ws.attachGpu")}
                   </button>
                   {ws.state === "stopped" ? (
-                    <button className="btn-ghost rounded p-1.5 text-ink3" title="启动" onClick={() => act(ws.id, "start", load, setErr)}>
+                    <button className="btn-ghost rounded p-1.5 text-ink3" title={t("common.start")} onClick={() => act(ws.id, "start", load, setErr)}>
                       <Play size={14} />
                     </button>
                   ) : (
-                    <button className="btn-ghost rounded p-1.5 text-ink3" title="停止" onClick={() => act(ws.id, "stop", load, setErr)}>
+                    <button
+                      className="btn-ghost rounded p-1.5 text-ink3"
+                      title={t("common.stop")}
+                      disabled={ws.state === "stopping"}
+                      onClick={() => act(ws.id, "stop", load, setErr)}
+                    >
                       <Square size={14} />
                     </button>
                   )}
                   <button
                     className="btn-ghost rounded p-1.5 text-failed"
-                    title="删除"
+                    title={t("common.delete")}
                     onClick={() => {
-                      if (confirm(`删除开发机 ${ws.name}？（含其持久卷）`)) act(ws.id, "delete", load, setErr);
+                      if (confirm(t("ws.confirmDelete", { name: ws.name }))) act(ws.id, "delete", load, setErr);
                     }}
                   >
                     <Trash2 size={14} />
@@ -139,53 +166,61 @@ export function WorkspacesPage() {
               {/* attached GPU debug sessions */}
               <div className="px-4 py-2">
                 {sess.length === 0 ? (
-                  <div className="py-1 text-xs text-ink3">无 GPU 调试会话。点「挂 GPU」给这台开发机挂卡联调，空闲自动回收。</div>
+                  <div className="py-1 text-xs text-ink3">{t("ws.noSession")}</div>
                 ) : (
                   <table className="w-full text-[13px]">
                     <thead>
                       <tr className="text-left text-xs text-ink3">
-                        <th className="py-1.5 font-medium">调试会话</th>
+                        <th className="py-1.5 font-medium">{t("ws.sessionCol")}</th>
                         <th className="py-1.5 font-medium">GPU</th>
-                        <th className="py-1.5 font-medium">状态</th>
-                        <th className="py-1.5 font-medium">IDE</th>
-                        <th className="py-1.5 text-right font-medium">操作</th>
+                        <th className="py-1.5 font-medium">{t("common.status")}</th>
+                        <th className="py-1.5 font-medium">{t("ws.ide")}</th>
+                        <th className="py-1.5 text-right font-medium">{t("common.actions")}</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {sess.map((s) => (
-                        <tr key={s.id} className="border-t border-border/50">
-                          <td className="py-1.5 font-mono text-xs text-ink2">{s.id}</td>
-                          <td className="py-1.5 text-ink2">
-                            <span className="inline-flex items-center gap-1">
-                              <Cpu size={12} className="text-ink3" /> {s.gpu_type} × {s.gpu_count}
-                            </span>
-                          </td>
-                          <td className="py-1.5">
-                            <span className={`chip ${stateChip(s.state)}`}>{s.state}</span>
-                          </td>
-                          <td className="py-1.5">
-                            {Object.entries(s.ide_urls || {}).map(([k, url]) => (
-                              <a key={k} href={url} target="_blank" rel="noreferrer" className="mr-2 text-brand hover:underline">{k}</a>
-                            ))}
-                          </td>
-                          <td className="py-1.5 text-right">
-                            <button
-                              className="btn-ghost rounded p-1 text-failed"
-                              title="结束会话"
-                              onClick={async () => {
-                                try {
-                                  await deleteDevSession(s.id);
-                                  load();
-                                } catch (e) {
-                                  setErr(errMsg(e));
-                                }
-                              }}
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                      {sess.map((s) => {
+                        const sRunning = s.state === "running";
+                        const sLinks = Object.entries(s.ide_urls || {});
+                        return (
+                          <tr key={s.id} className="border-t border-border/50">
+                            <td className="py-1.5 font-mono text-xs text-ink2">{s.id}</td>
+                            <td className="py-1.5 text-ink2">
+                              <span className="inline-flex items-center gap-1">
+                                <Cpu size={12} className="text-ink3" /> {s.gpu_type} × {s.gpu_count}
+                              </span>
+                            </td>
+                            <td className="py-1.5">
+                              <span className={`chip ${stateChip(s.state)}`}>{s.state}</span>
+                            </td>
+                            <td className="py-1.5">
+                              {sRunning && sLinks.length > 0
+                                ? sLinks.map(([k, url]) => (
+                                    <a key={k} href={url} target="_blank" rel="noreferrer" className="mr-2 text-brand hover:underline">
+                                      {k}
+                                    </a>
+                                  ))
+                                : <span className="text-xs text-ink3">—</span>}
+                            </td>
+                            <td className="py-1.5 text-right">
+                              <button
+                                className="btn-ghost rounded p-1 text-failed"
+                                title={t("ws.endSession")}
+                                onClick={async () => {
+                                  try {
+                                    await deleteDevSession(s.id);
+                                    load();
+                                  } catch (e) {
+                                    setErr(errMsg(e));
+                                  }
+                                }}
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 )}
@@ -215,6 +250,7 @@ async function act(id: string, action: "start" | "stop" | "delete", reload: () =
 }
 
 function CreateWorkspaceModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const { t } = useI18n();
   const [name, setName] = useState("");
   const [cpu, setCpu] = useState(4);
   const [mem, setMem] = useState(8);
@@ -222,7 +258,7 @@ function CreateWorkspaceModal({ onClose, onDone }: { onClose: () => void; onDone
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const submit = async () => {
-    if (!name.trim()) return setErr("名称必填");
+    if (!name.trim()) return setErr(t("ws.nameRequired"));
     setBusy(true);
     setErr("");
     try {
@@ -236,31 +272,32 @@ function CreateWorkspaceModal({ onClose, onDone }: { onClose: () => void; onDone
   };
   return (
     <Modal
-      title="新建开发机"
+      title={t("ws.createTitle")}
       open
       onClose={onClose}
       footer={
         <>
-          <button className="btn" onClick={onClose}>取消</button>
+          <button className="btn" onClick={onClose}>{t("common.cancel")}</button>
           <button className="btn btn-primary" disabled={busy} onClick={submit}>
-            {busy && <Loader size={13} className="animate-spin" />} 创建
+            {busy && <Loader size={13} className="animate-spin" />} {t("common.create")}
           </button>
         </>
       }
     >
       {err && <div className="mb-3 rounded-md border border-failed/30 bg-failed/10 px-3 py-2 text-xs text-failed">{err}</div>}
-      <Field label="名称"><input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="ws-pointcept" /></Field>
+      <Field label={t("ws.name")}><input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="ws-pointcept" /></Field>
       <div className="grid grid-cols-3 gap-3">
-        <Field label="CPU"><input type="number" min={1} className="input" value={cpu} onChange={(e) => setCpu(+e.target.value)} /></Field>
-        <Field label="内存 GiB"><input type="number" min={1} className="input" value={mem} onChange={(e) => setMem(+e.target.value)} /></Field>
-        <Field label="PVC GiB"><input type="number" min={10} className="input" value={pvc} onChange={(e) => setPvc(+e.target.value)} /></Field>
+        <Field label={t("ws.cpu")}><input type="number" min={1} className="input" value={cpu} onChange={(e) => setCpu(+e.target.value)} /></Field>
+        <Field label={t("ws.memGi")}><input type="number" min={1} className="input" value={mem} onChange={(e) => setMem(+e.target.value)} /></Field>
+        <Field label={t("ws.pvcGi")}><input type="number" min={10} className="input" value={pvc} onChange={(e) => setPvc(+e.target.value)} /></Field>
       </div>
-      <p className="text-xs text-ink3">开发机是常驻 CPU Pod + 持久卷，内置 Jupyter / VS Code / SSH。需要 GPU 联调时在卡片上「挂 GPU」开调试会话。</p>
+      <p className="text-xs text-ink3">{t("ws.createHint")}</p>
     </Modal>
   );
 }
 
 function AttachGpuModal({ ws, onClose, onDone }: { ws: Workspace; onClose: () => void; onDone: () => void }) {
+  const { t } = useI18n();
   const [gpuType, setGpuType] = useState("h20");
   const [count, setCount] = useState(1);
   const [busy, setBusy] = useState(false);
@@ -279,27 +316,27 @@ function AttachGpuModal({ ws, onClose, onDone }: { ws: Workspace; onClose: () =>
   };
   return (
     <Modal
-      title={`挂 GPU 调试会话 · ${ws.name}`}
+      title={`${t("ws.attachGpuTitle")} · ${ws.name}`}
       open
       width={420}
       onClose={onClose}
       footer={
         <>
-          <button className="btn" onClick={onClose}>取消</button>
+          <button className="btn" onClick={onClose}>{t("common.cancel")}</button>
           <button className="btn btn-primary" disabled={busy} onClick={submit}>
-            {busy && <Loader size={13} className="animate-spin" />} 创建会话
+            {busy && <Loader size={13} className="animate-spin" />} {t("ws.createSession")}
           </button>
         </>
       }
     >
       {err && <div className="mb-3 rounded-md border border-failed/30 bg-failed/10 px-3 py-2 text-xs text-failed">{err}</div>}
       <div className="grid grid-cols-2 gap-3">
-        <Field label="GPU 类型">
+        <Field label={t("ws.gpuType")}>
           <Select value={gpuType} onChange={setGpuType} options={[{ value: "h20", label: "h20" }, { value: "a100", label: "a100" }]} />
         </Field>
-        <Field label="GPU 数量"><input type="number" min={1} max={8} className="input" value={count} onChange={(e) => setCount(+e.target.value)} /></Field>
+        <Field label={t("ws.gpuCount")}><input type="number" min={1} max={8} className="input" value={count} onChange={(e) => setCount(+e.target.value)} /></Field>
       </div>
-      <p className="text-xs text-ink3">调试会话挂载本开发机的同一个持久卷（共享代码），空闲超时自动回收，避免占用 GPU。</p>
+      <p className="text-xs text-ink3">{t("ws.gpuHint")}</p>
     </Modal>
   );
 }

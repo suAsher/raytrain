@@ -1,11 +1,11 @@
 // Data access for the console pages, backed by /v1/console/* on raytrain-server.
-// Each call uses withFallback: real backend first, mock on failure (which flips
-// the global "demo data" banner). The backend returns shapes already aligned to
-// the console's domain types (see raytrain_server/api/console.py).
+// Real data only — no mock fallback. Empty results render as empty states and
+// failures surface as FriendlyError messages (Req 14.5/14.6). The backend
+// returns shapes already aligned to the console's domain types
+// (see raytrain_server/api/console.py).
 
-import { apiFetch, withFallback } from "./api";
+import { apiFetch } from "./api";
 import type { Job, Queue, Experiment, ResourcePool, JobStatus } from "./types";
-import { JOBS, QUEUE_DATA, POOLS, EXPERIMENTS } from "./mockData";
 
 interface OverviewResp {
   counts: Record<string, number>;
@@ -21,17 +21,11 @@ interface OverviewResp {
 }
 
 export async function fetchJobs(): Promise<Job[]> {
-  return withFallback(
-    () => apiFetch<Job[]>("/v1/console/jobs"),
-    () => JOBS
-  );
+  return apiFetch<Job[]>("/v1/console/jobs");
 }
 
 export async function fetchJob(id: string): Promise<Job | undefined> {
-  return withFallback(
-    () => apiFetch<Job>(`/v1/console/jobs/${id}`),
-    () => JOBS.find((j) => j.id === id)
-  );
+  return apiFetch<Job>(`/v1/console/jobs/${id}`);
 }
 
 export async function fetchOverview(): Promise<{
@@ -40,33 +34,19 @@ export async function fetchOverview(): Promise<{
   recentFailed: Job[];
   recent: Job[];
 }> {
-  return withFallback(
-    async () => {
-      const r = await apiFetch<OverviewResp>("/v1/console/overview");
-      return {
-        counts: r.counts,
-        pools: r.pools.map((p) => ({
-          name: p.name as ResourcePool["name"],
-          totalGpu: p.total_gpu,
-          usedGpu: p.used_gpu,
-          nodes: p.nodes,
-          health: p.health as ResourcePool["health"],
-        })),
-        recentFailed: r.recentFailed as Job[],
-        recent: r.recent as Job[],
-      };
-    },
-    () => {
-      const counts: Record<string, number> = {};
-      JOBS.forEach((j) => (counts[j.status] = (counts[j.status] || 0) + 1));
-      return {
-        counts,
-        pools: POOLS,
-        recentFailed: JOBS.filter((j) => j.status === "Failed"),
-        recent: [...JOBS].slice(0, 6),
-      };
-    }
-  );
+  const r = await apiFetch<OverviewResp>("/v1/console/overview");
+  return {
+    counts: r.counts,
+    pools: r.pools.map((p) => ({
+      name: p.name as ResourcePool["name"],
+      totalGpu: p.total_gpu,
+      usedGpu: p.used_gpu,
+      nodes: p.nodes,
+      health: p.health as ResourcePool["health"],
+    })),
+    recentFailed: r.recentFailed as Job[],
+    recent: r.recent as Job[],
+  };
 }
 
 interface QueueResp {
@@ -79,35 +59,108 @@ interface QueueResp {
   admitted: number;
   avg_wait_min: number;
   health: string;
+  source?: string;
   recentJobs: { id: string; name: string; status: JobStatus }[];
 }
 
 export async function fetchQueues(): Promise<Queue[]> {
-  return withFallback(
-    async () => {
-      const rows = await apiFetch<QueueResp[]>("/v1/console/queues");
-      return rows.map((q) => ({
-        name: q.name,
-        clusterQueue: q.cluster_queue,
-        gpuType: q.gpu_type as Queue["gpuType"],
-        nominal: q.nominal,
-        used: q.used,
-        pending: q.pending,
-        admitted: q.admitted,
-        avgWaitMin: q.avg_wait_min,
-        health: q.health as Queue["health"],
-        recentJobs: q.recentJobs || [],
-      }));
-    },
-    () => QUEUE_DATA
-  );
+  const rows = await apiFetch<QueueResp[]>("/v1/console/queues");
+  return rows.map((q) => ({
+    name: q.name,
+    clusterQueue: q.cluster_queue,
+    gpuType: q.gpu_type as Queue["gpuType"],
+    nominal: q.nominal,
+    used: q.used,
+    pending: q.pending,
+    admitted: q.admitted,
+    avgWaitMin: q.avg_wait_min,
+    health: q.health as Queue["health"],
+    recentJobs: q.recentJobs || [],
+  }));
 }
 
 export async function fetchExperiments(): Promise<Experiment[]> {
-  return withFallback(
-    () => apiFetch<Experiment[]>("/v1/console/experiments"),
-    () => EXPERIMENTS
+  return apiFetch<Experiment[]>("/v1/console/experiments");
+}
+
+// --------------------------------------------------------------------------- //
+// Caller's own quota + usage (/v1/quota) — drives the top-bar resource summary.
+// max_* == 0 means "unlimited" on the backend.
+// --------------------------------------------------------------------------- //
+
+export interface MyQuota {
+  user: string;
+  quota: { max_gpus: number; max_jobs: number; max_cpus: number; max_memory_gi: number };
+  usage: { gpus: number; cpus: number; memory_gi: number; jobs: number };
+  remaining: Record<string, number | null>;
+}
+
+export async function fetchMyQuota(): Promise<MyQuota> {
+  return apiFetch<MyQuota>("/v1/quota");
+}
+
+// Runtime images registered by admins (/v1/admin/resources/runtime_image) —
+// the Create-Job wizard's image dropdown. Read path is open to any user.
+export async function fetchRuntimeImages(): Promise<string[]> {
+  const rows = await apiFetch<{ name: string; enabled: boolean }[]>(
+    "/v1/admin/resources/runtime_image"
   );
+  return rows.filter((r) => r.enabled).map((r) => r.name);
+}
+
+// Projects registered by admins — the Create-Job wizard's project dropdown.
+export async function fetchProjects(): Promise<string[]> {
+  const rows = await apiFetch<{ name: string; enabled: boolean }[]>(
+    "/v1/admin/resources/project"
+  );
+  return rows.filter((r) => r.enabled).map((r) => r.name);
+}
+
+// --------------------------------------------------------------------------- //
+// Real training logs (Loki) + metrics (Prometheus) for the Job Detail page.
+// Both endpoints return an explicit `source` ("loki"/"prometheus"/"unavailable")
+// and a `reason` when data isn't available — never synthesized (Req 8/10/14.5).
+// --------------------------------------------------------------------------- //
+
+export interface LogLineResp {
+  ts?: string;
+  container?: string;
+  level?: string;
+  text: string;
+}
+
+export interface JobLogsResp {
+  lines: LogLineResp[];
+  next_cursor: string | null;
+  source: "loki" | "unavailable";
+  reason?: string;
+}
+
+export async function fetchJobLogs(id: string, container?: string): Promise<JobLogsResp> {
+  const qs = container && container !== "all" ? `?container=${encodeURIComponent(container)}` : "";
+  return apiFetch<JobLogsResp>(`/v1/console/jobs/${id}/logs${qs}`);
+}
+
+export interface MetricPoint {
+  t: string;
+  value: number;
+}
+
+export interface MetricSeriesResp {
+  metric: string; // gpu_util | gpu_mem | throughput
+  unit: string;
+  points: MetricPoint[];
+  source: "prometheus" | "unavailable";
+}
+
+export interface JobMetricsResp {
+  series: MetricSeriesResp[];
+  source: "prometheus" | "unavailable";
+  reason?: string;
+}
+
+export async function fetchJobMetrics(id: string): Promise<JobMetricsResp> {
+  return apiFetch<JobMetricsResp>(`/v1/console/jobs/${id}/metrics`);
 }
 
 export interface ArtifactRow {
@@ -121,26 +174,7 @@ export interface ArtifactRow {
 }
 
 export async function fetchArtifacts(): Promise<ArtifactRow[]> {
-  return withFallback(
-    () => apiFetch<ArtifactRow[]>("/v1/console/artifacts"),
-    () => {
-      const out: ArtifactRow[] = [];
-      JOBS.forEach((j) =>
-        (j.artifacts || []).forEach((a) =>
-          out.push({
-            name: a.name,
-            kind: a.kind,
-            size: a.size,
-            path: a.path,
-            created_at: a.createdAt,
-            jobId: j.id,
-            jobName: j.name,
-          })
-        )
-      );
-      return out;
-    }
-  );
+  return apiFetch<ArtifactRow[]>("/v1/console/artifacts");
 }
 
 // mutations
@@ -305,8 +339,8 @@ export async function deleteQueue(name: string): Promise<void> {
 }
 
 // --------------------------------------------------------------------------- //
-// Workspaces + DevSessions (开发机) — real endpoints, with mock fallback so the
-// pages render even before a cluster is wired.
+// Workspaces + DevSessions (开发机) — real endpoints only. State is derived by
+// the backend from the live cluster; empty lists render as empty states.
 // --------------------------------------------------------------------------- //
 
 export interface Workspace {
@@ -317,6 +351,7 @@ export interface Workspace {
   image: string;
   state: string;
   pod_phase?: string | null;
+  reason?: string | null;
   ide_urls: Record<string, string>;
   cpu: number;
   memory_gi: number;
@@ -334,15 +369,9 @@ export interface DevSession {
   ide_urls: Record<string, string>;
 }
 
-const MOCK_WORKSPACES: Workspace[] = [
-  { id: "ws-demo01", user: "asher", tenant: "research", name: "ws-pointcept", image: "raytrain/workspace:cpu-base-v1", state: "running", pod_phase: "Running", ide_urls: { jupyter: "#", code: "#", ssh: "ssh://ws-demo01:22" }, cpu: 4, memory_gi: 8, pvc_gi: 100 },
-];
-const MOCK_DEVSESSIONS: DevSession[] = [
-  { id: "dev-demo01", workspace_id: "ws-demo01", user: "asher", gpu_type: "h20", gpu_count: 1, state: "running", pod_phase: "Running", ide_urls: { jupyter: "#" } },
-];
-
 export async function fetchWorkspaces(): Promise<Workspace[]> {
-  return withFallback(() => apiFetch<Workspace[]>("/v1/workspaces"), () => MOCK_WORKSPACES);
+  // Req 14.5/14.6 — real data only; empty list shows an empty state, never mock.
+  return apiFetch<Workspace[]>("/v1/workspaces");
 }
 
 export async function createWorkspace(body: {
@@ -363,7 +392,8 @@ export async function workspaceAction(id: string, action: "start" | "stop" | "de
 }
 
 export async function fetchDevSessions(): Promise<DevSession[]> {
-  return withFallback(() => apiFetch<DevSession[]>("/v1/dev-sessions"), () => MOCK_DEVSESSIONS);
+  // Real data only (no mock masquerade).
+  return apiFetch<DevSession[]>("/v1/dev-sessions");
 }
 
 export async function createDevSession(body: {

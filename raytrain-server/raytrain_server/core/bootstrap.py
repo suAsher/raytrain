@@ -17,6 +17,9 @@ from .settings import Settings
 from .sql_store import (
     SqlDatasetStore,
     SqlDevSessionStore,
+    SqlJobStore,
+    SqlQueueMetaStore,
+    SqlResourceStore,
     SqlUserStore,
     SqlWorkspaceStore,
 )
@@ -25,6 +28,9 @@ from .store import (
     set_devsession_store,
     set_workspace_store,
 )
+from .jobs_store import set_job_store
+from .queues_store import set_queue_meta_store
+from .resources_store import set_resource_store
 from .users import set_user_store
 
 log = logging.getLogger(__name__)
@@ -43,6 +49,9 @@ def configure_persistence(settings: Settings) -> Database | None:
     set_devsession_store(SqlDevSessionStore(db))
     set_dataset_store(SqlDatasetStore(db))
     set_user_store(SqlUserStore(db))
+    set_job_store(SqlJobStore(db))
+    set_resource_store(SqlResourceStore(db, seed=True))
+    set_queue_meta_store(SqlQueueMetaStore(db))
     set_audit(AuditLog(db))
 
     log.info("persistence configured: %s", settings.database_url.split("@")[-1])

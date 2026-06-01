@@ -25,6 +25,7 @@ from ..core.k8s_client import K8sClient
 from ..core.settings import Settings, get_settings
 from ..core.store import WorkspaceRecord, WorkspaceStore, get_workspace_store
 from ..core import workspace as ws
+from ..core.workspace_service import WorkspaceService, derive_state, validate_image
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ class WorkspaceResponse(BaseModel):
     image: str
     state: str
     pod_phase: str | None = None
+    reason: str | None = None
     ide_urls: dict = {}
     cpu: int
     memory_gi: int
@@ -65,7 +67,12 @@ class WorkspaceResponse(BaseModel):
 
     @classmethod
     def from_record(
-        cls, rec: WorkspaceRecord, pod_phase: str | None = None
+        cls,
+        rec: WorkspaceRecord,
+        pod_phase: str | None = None,
+        reason: str | None = None,
+        state: str | None = None,
+        ide_urls: dict | None = None,
     ) -> "WorkspaceResponse":
         return cls(
             id=rec.id,
@@ -73,9 +80,10 @@ class WorkspaceResponse(BaseModel):
             tenant=rec.tenant,
             name=rec.name,
             image=rec.image,
-            state=rec.state,
+            state=state if state is not None else rec.state,
             pod_phase=pod_phase,
-            ide_urls=rec.ide_urls,
+            reason=reason,
+            ide_urls=ide_urls if ide_urls is not None else rec.ide_urls,
             cpu=rec.cpu,
             memory_gi=rec.memory_gi,
             pvc_gi=rec.pvc_gi,
@@ -124,6 +132,29 @@ def _ensure_owner(identity: Identity, rec: WorkspaceRecord) -> None:
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="not owner")
 
 
+def _audit(identity: Identity, action: str, resource: str, result: str) -> None:
+    from ..core.audit import get_audit
+
+    get_audit().record(user=identity.user, action=action, resource=resource, result=result)
+
+
+def _build_response(
+    rec: WorkspaceRecord, k8s: K8sClient, settings: Settings
+) -> WorkspaceResponse:
+    """Derive real state + (only when running) NodePort IDE URLs."""
+    d = derive_state(rec, k8s, settings.workspace_namespace)
+    ide_urls: dict = {}
+    if d.state == "running" and rec.service_name:
+        node_ports = k8s.service_node_ports(rec.service_name, settings.workspace_namespace)
+        node_host = settings.workspace_node_host or (
+            k8s.node_address(rec.pod_name, settings.workspace_namespace) or ""
+        )
+        ide_urls = ws.build_ide_urls_nodeport(node_host, node_ports)
+    return WorkspaceResponse.from_record(
+        rec, pod_phase=d.pod_phase, reason=d.reason, state=d.state, ide_urls=ide_urls
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
@@ -144,11 +175,14 @@ def create_workspace(
             detail=f"workspace limit reached ({DEFAULT_MAX_WORKSPACES})",
         )
 
+    image = body.image or settings.workspace_image
+    validate_image(image)  # Req 2.4 — reject malformed custom images
+
     rec = store.create(
         user=identity.user,
         tenant=identity.tenant,
         name=body.name,
-        image=body.image or settings.workspace_image,
+        image=image,
         cpu=body.cpu or settings.workspace_default_cpu,
         memory_gi=body.memory_gi or settings.workspace_default_memory_gi,
         pvc_gi=body.pvc_gi or settings.workspace_default_pvc_gi,
@@ -161,7 +195,6 @@ def create_workspace(
         pod_name=spec.pod_name,
         pvc_name=spec.pvc_name,
         service_name=spec.service_name,
-        ide_urls=ws.build_ide_urls(spec, settings.workspace_base_domain),
     )
 
     try:
@@ -181,18 +214,22 @@ def create_workspace(
             detail=f"failed to create workspace: {exc!r}",
         ) from exc
 
-    rec = store.update(rec.id, state="running")
+    # Req 1.1 — do NOT fake "running"; mark creating and let derive_state map
+    # the real pod phase on subsequent reads.
+    rec = store.update(rec.id, state="creating")
     log.info("workspace.create id=%s user=%s", rec.id, identity.user)
-    return WorkspaceResponse.from_record(rec)
+    return _build_response(rec, k8s, settings)
 
 
 @router.get("", response_model=list[WorkspaceResponse])
 def list_workspaces(
     identity: Identity = Depends(require_user),
     store: WorkspaceStore = Depends(_store),
+    k8s: K8sClient = Depends(_k8s),
+    settings: Settings = Depends(get_settings),
 ) -> list[WorkspaceResponse]:
     recs = store.list_for_user(identity.user, is_admin=identity.is_admin)
-    return [WorkspaceResponse.from_record(r) for r in recs]
+    return [_build_response(r, k8s, settings) for r in recs]
 
 
 @router.get("/{wid}", response_model=WorkspaceResponse)
@@ -207,13 +244,7 @@ def get_workspace(
     if not rec:
         raise HTTPException(status_code=404, detail="workspace not found")
     _ensure_owner(identity, rec)
-    phase = None
-    if rec.pod_name:
-        try:
-            phase = k8s.pod_phase(rec.pod_name, settings.workspace_namespace)
-        except Exception:  # noqa: BLE001
-            phase = "Unknown"
-    return WorkspaceResponse.from_record(rec, pod_phase=phase)
+    return _build_response(rec, k8s, settings)
 
 
 @router.post("/{wid}/stop", response_model=WorkspaceResponse)
@@ -230,8 +261,11 @@ def stop_workspace(
     _ensure_owner(identity, rec)
     if rec.pod_name:
         k8s.delete_pod(rec.pod_name, settings.workspace_namespace)
-    rec = store.update(wid, state="stopped")
-    return WorkspaceResponse.from_record(rec)
+    # Req 4.1/4.2 — mark stopping (pod may still be Terminating); derive_state
+    # reports 'stopping' until the pod is fully gone, then 'stopped'.
+    rec = store.update(wid, state="stopping")
+    _audit(identity, "workspace.stop", wid, "ok")
+    return _build_response(rec, k8s, settings)
 
 
 @router.post("/{wid}/start", response_model=WorkspaceResponse)
@@ -247,8 +281,9 @@ def start_workspace(
         raise HTTPException(status_code=404, detail="workspace not found")
     _ensure_owner(identity, rec)
     spec = _spec_from(rec, settings, token="")
+    svc = WorkspaceService(store, k8s, settings)
+    # PVC persists across stop/start.
     try:
-        # PVC persists; just recreate the pod + service.
         k8s.ensure_pvc(
             name=spec.pvc_name,
             namespace=spec.namespace,
@@ -256,14 +291,18 @@ def start_workspace(
             storage_class=spec.storage_class,
             labels=ws.build_pvc_labels(spec),
         )
-        k8s.create_pod(ws.build_pod_manifest(spec), spec.namespace)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"failed to ensure PVC: {exc!r}") from exc
+    # Req 4.3/4.4/4.5 — wait for any old (Terminating) pod, then create; 409→Friendly.
+    svc.start_after_terminating(rec, spec)
+    try:
         k8s.ensure_service(ws.build_service_manifest(spec), spec.namespace)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=502, detail=f"failed to start workspace: {exc!r}"
-        ) from exc
-    rec = store.update(wid, state="running")
-    return WorkspaceResponse.from_record(rec)
+        raise HTTPException(status_code=502, detail=f"failed to ensure service: {exc!r}") from exc
+    # Req 4.6 — back to creating; derive_state maps to running once ready.
+    rec = store.update(wid, state="creating")
+    _audit(identity, "workspace.start", wid, "ok")
+    return _build_response(rec, k8s, settings)
 
 
 @router.delete("/{wid}", status_code=204)

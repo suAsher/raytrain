@@ -161,9 +161,34 @@ def _extract_bearer(authorization: str | None) -> str:
 def require_user(
     authorization: str | None = Header(default=None),
 ) -> Identity:
-    """Standard dependency for any authenticated endpoint."""
+    """Standard dependency for any authenticated endpoint.
+
+    Beyond verifying the JWT signature/claims, we re-check the user's *current*
+    enabled state against the store: a token stays cryptographically valid until
+    expiry, so disabling a user must take effect immediately (defense against a
+    revoked user reusing an already-issued long-lived token). If the platform
+    has no user record (fresh bootstrap / token-only user) we don't block.
+    """
     token = _extract_bearer(authorization)
-    return verify_token(token)
+    identity = verify_token(token)
+    _assert_active(identity.user)
+    return identity
+
+
+def _assert_active(user: str) -> None:
+    """Raise 401 if the user exists in the store but is disabled. No record =
+    don't block (bootstrap / automation tokens)."""
+    # Imported here to avoid a circular import (users -> nothing, but keep the
+    # auth module dependency-light and testable without a store wired).
+    from .users import get_user_store
+
+    rec = get_user_store().get(user)
+    if rec is not None and not rec.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="账号已被禁用",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def require_admin(

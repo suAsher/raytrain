@@ -10,7 +10,7 @@ admin seeds (and the job store keeps ``used`` roughly in sync via
 from __future__ import annotations
 
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Optional
 
 
@@ -135,3 +135,41 @@ def get_queue_store() -> QueueStore:
 def set_queue_store(s: QueueStore) -> None:
     global _queue_store
     _queue_store = s
+
+
+# Queue display-metadata store (alias/sort only; usage comes live from Kueue).
+# In-memory default; SQL-backed (SqlQueueMetaStore) selected at bootstrap.
+_queue_meta_store = None
+
+
+def get_queue_meta_store():
+    global _queue_meta_store
+    if _queue_meta_store is None:
+        _queue_meta_store = _InMemoryQueueMeta()
+    return _queue_meta_store
+
+
+def set_queue_meta_store(s) -> None:
+    global _queue_meta_store
+    _queue_meta_store = s
+
+
+class _InMemoryQueueMeta:
+    """Default queue-meta store; matches SqlQueueMetaStore's interface."""
+
+    def __init__(self) -> None:
+        self._items: dict[str, dict] = {}
+
+    def get(self, name: str):
+        return self._items.get(name)
+
+    def list_all(self):
+        return list(self._items.values())
+
+    def upsert(self, name: str, display_alias: str = "", sort_order: int = 0) -> None:
+        self._items[name] = {
+            "name": name, "display_alias": display_alias, "sort_order": sort_order,
+        }
+
+    def delete(self, name: str) -> bool:
+        return self._items.pop(name, None) is not None

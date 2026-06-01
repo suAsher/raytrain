@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { User, Lock, KeyRound, Loader } from "lucide-react";
+import { User, Lock, KeyRound, Loader, Languages } from "lucide-react";
 import { login, setToken, whoami, clearToken, errMsg } from "../lib/api";
+import { useI18n } from "../i18n";
 
 type Mode = "password" | "token";
 
 export function LoginPage() {
   const nav = useNavigate();
+  const { t, lang, setLang } = useI18n();
   const [mode, setMode] = useState<Mode>("password");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -21,14 +23,14 @@ export function LoginPage() {
     try {
       if (mode === "password") {
         if (!username.trim() || !password) {
-          setErr("请输入用户名和密码");
+          setErr(t("login.needCreds"));
           return;
         }
         await login(username.trim(), password);
         nav("/overview");
       } else {
         if (!token.trim()) {
-          setErr("请输入访问令牌");
+          setErr(t("login.needToken"));
           return;
         }
         setToken(token.trim());
@@ -37,7 +39,7 @@ export function LoginPage() {
       }
     } catch (e2) {
       clearToken();
-      setErr(mode === "password" ? "用户名或密码错误" : errMsg(e2) || "token 无效或已过期");
+      setErr(mode === "password" ? t("login.badCreds") : errMsg(e2) || t("login.badToken"));
     } finally {
       setBusy(false);
     }
@@ -51,9 +53,17 @@ export function LoginPage() {
             r
           </div>
           <div>
-            <div className="font-semibold text-ink">raytrain console</div>
-            <div className="text-xs text-ink3">训练任务工作台</div>
+            <div className="font-semibold text-ink">{t("login.title")}</div>
+            <div className="text-xs text-ink3">{t("login.subtitle")}</div>
           </div>
+          <button
+            type="button"
+            onClick={() => setLang(lang === "zh" ? "en" : "zh")}
+            className="ml-auto flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs text-ink2 hover:bg-panel2"
+          >
+            <Languages size={13} className="text-ink3" />
+            {lang === "zh" ? "中文" : "EN"}
+          </button>
         </div>
 
         {/* mode tabs */}
@@ -65,7 +75,7 @@ export function LoginPage() {
               mode === "password" ? "bg-panel2 font-medium text-ink" : "text-ink3 hover:text-ink2"
             }`}
           >
-            账号密码登录
+            {t("login.byPassword")}
           </button>
           <button
             type="button"
@@ -74,13 +84,13 @@ export function LoginPage() {
               mode === "token" ? "bg-panel2 font-medium text-ink" : "text-ink3 hover:text-ink2"
             }`}
           >
-            令牌登录
+            {t("login.byToken")}
           </button>
         </div>
 
         {mode === "password" ? (
           <>
-            <label className="label">用户名</label>
+            <label className="label">{t("login.username")}</label>
             <div className="relative mb-3">
               <User size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink3" />
               <input
@@ -91,7 +101,7 @@ export function LoginPage() {
                 className="input pl-8"
               />
             </div>
-            <label className="label">密码</label>
+            <label className="label">{t("login.password")}</label>
             <div className="relative">
               <Lock size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink3" />
               <input
@@ -105,7 +115,7 @@ export function LoginPage() {
           </>
         ) : (
           <>
-            <label className="label">访问令牌 (Token)</label>
+            <label className="label">{t("login.token")}</label>
             <div className="relative">
               <KeyRound size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink3" />
               <input
@@ -124,13 +134,11 @@ export function LoginPage() {
 
         <button type="submit" disabled={busy} className="btn btn-primary mt-4 w-full justify-center">
           {busy && <Loader size={14} className="animate-spin" />}
-          登录
+          {t("login.submit")}
         </button>
 
         <p className="mt-4 text-xs leading-relaxed text-ink3">
-          {mode === "password"
-            ? "账号由管理员在「Admin · 用户」中创建并设置密码。忘记密码请联系管理员重置。"
-            : "令牌用于自动化 / CLI；浏览器登录推荐使用账号密码。"}
+          {mode === "password" ? t("login.hintPassword") : t("login.hintToken")}
         </p>
       </form>
     </div>
